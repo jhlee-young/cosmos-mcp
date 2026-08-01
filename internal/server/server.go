@@ -306,6 +306,9 @@ func response(started time.Time, source string, request map[string]any, data any
 	}
 	if encoded, marshalErr := json.Marshal(out); marshalErr == nil {
 		result.Content = []mcp.Content{&mcp.TextContent{Text: string(encoded)}}
+	} else {
+		result.IsError = true
+		result.Content = []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("failed to encode tool response: %v", marshalErr)}}
 	}
 	return result, out, nil
 }
