@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+const (
+	defaultTimeout  = 15 * time.Second
+	defaultMaxBytes = int64(4 << 20) // 4 MiB
+)
+
 type HTTPClient struct {
 	client   *http.Client
 	timeout  time.Duration
@@ -18,6 +23,12 @@ type HTTPClient struct {
 }
 
 func NewHTTPClient(timeout time.Duration, maxBytes int64) *HTTPClient {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxBytes
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 32
 	transport.MaxIdleConnsPerHost = 8

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -36,6 +37,15 @@ type GRPCClient struct {
 }
 
 func NewGRPCClient(target string, plaintext bool, timeout time.Duration, maxBytes int64) (*GRPCClient, error) {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxBytes
+	}
+	if maxBytes > math.MaxInt32 {
+		maxBytes = math.MaxInt32
+	}
 	var transport credentials.TransportCredentials
 	if plaintext {
 		transport = insecure.NewCredentials()
