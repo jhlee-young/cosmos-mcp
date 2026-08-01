@@ -72,6 +72,8 @@ func TestGRPCQueryWithoutReflection(t *testing.T) {
 
 func newTestGRPCClient(t *testing.T, withReflection bool) (*GRPCClient, func()) {
 	t.Helper()
+	var registerTestDescriptorErr error
+
 	registerTestDescriptor.Do(func() {
 		file, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
 			Name:       proto.String(testQueryFile),
@@ -88,12 +90,16 @@ func newTestGRPCClient(t *testing.T, withReflection bool) (*GRPCClient, func()) 
 			}},
 		}, protoregistry.GlobalFiles)
 		if err != nil {
-			t.Fatal(err)
+			registerTestDescriptorErr = err
+			return
 		}
 		if err := protoregistry.GlobalFiles.RegisterFile(file); err != nil {
-			t.Fatal(err)
+			registerTestDescriptorErr = err
 		}
 	})
+	if registerTestDescriptorErr != nil {
+		t.Fatalf("register test descriptor: %v", registerTestDescriptorErr)
+	}
 	listener := bufconn.Listen(1 << 20)
 	grpcServer := grpc.NewServer()
 	grpcServer.RegisterService(&grpc.ServiceDesc{
