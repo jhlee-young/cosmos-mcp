@@ -25,6 +25,14 @@ func NewLCDClient(rawURL string, httpClient *HTTPClient) (*LCDClient, error) {
 func (c *LCDClient) Endpoint() string { return RedactedURL(c.base.String()) }
 
 func (c *LCDClient) Get(ctx context.Context, requestPath string, query map[string]string) (any, error) {
+	multi := make(map[string][]string, len(query))
+	for key, value := range query {
+		multi[key] = []string{value}
+	}
+	return c.GetMulti(ctx, requestPath, multi)
+}
+
+func (c *LCDClient) GetMulti(ctx context.Context, requestPath string, query map[string][]string) (any, error) {
 	if requestPath == "" || !strings.HasPrefix(requestPath, "/") || strings.HasPrefix(requestPath, "//") {
 		return nil, NewError(CodeInvalidInput, "LCD path must be an absolute path beginning with one slash", nil)
 	}
@@ -44,14 +52,16 @@ func (c *LCDClient) Get(ctx context.Context, requestPath string, query map[strin
 	u.Path = path.Join(strings.TrimSuffix(c.base.Path, "/"), parsed.Path)
 	u.RawPath = ""
 	values := c.base.Query()
-	for key, value := range query {
+	for key, items := range query {
 		if strings.TrimSpace(key) == "" {
 			return nil, NewError(CodeInvalidInput, "LCD query parameter names must not be empty", nil)
 		}
 		if values.Has(key) {
 			return nil, NewError(CodeInvalidInput, fmt.Sprintf("query parameter %q is fixed by the configured LCD endpoint and cannot be overridden", key), nil)
 		}
-		values.Set(key, value)
+		for _, value := range items {
+			values.Add(key, value)
+		}
 	}
 	u.RawQuery = values.Encode()
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)

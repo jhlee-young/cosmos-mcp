@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,33 @@ type HTTPClient struct {
 	client   *http.Client
 	timeout  time.Duration
 	maxBytes int64
+}
+
+type HTTPStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("upstream returned HTTP %d", e.StatusCode)
+}
+
+// IsRouteNotFound reports whether err represents an HTTP 404 whose body is
+// plain text from an HTTP router/proxy (route does not exist), as opposed to
+// a JSON error payload from the Cosmos SDK app itself (e.g. grpc-gateway's
+// {"code":...,"message":...} for a resource that legitimately wasn't found).
+// Only the former should trigger falling back to the next binding.
+func IsRouteNotFound(err error) bool {
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+		return false
+	}
+	body := strings.TrimSpace(statusErr.Body)
+	if body == "" {
+		return true
+	}
+	var jsonBody any
+	return json.Unmarshal([]byte(body), &jsonBody) != nil
 }
 
 func NewHTTPClient(timeout time.Duration, maxBytes int64) *HTTPClient {
@@ -62,8 +90,9 @@ func (c *HTTPClient) DoJSON(ctx context.Context, req *http.Request, out any) err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return NewError(CodeUpstreamError, fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode), nil)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		statusErr := &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(body)}
+		return NewError(CodeUpstreamError, statusErr.Error(), statusErr)
 	}
 	limited := io.LimitReader(resp.Body, c.maxBytes+1)
 	data, err := io.ReadAll(limited)
