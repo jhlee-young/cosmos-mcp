@@ -61,7 +61,8 @@ func Parse(args []string, getenv Getter) (Config, error) {
 	}
 
 	fs := flag.NewFlagSet("cosmos-mcp", flag.ContinueOnError)
-	fs.SetOutput(new(strings.Builder))
+	var flagOutput strings.Builder
+	fs.SetOutput(&flagOutput)
 	fs.StringVar(&cfg.RPCURL, "rpc-url", cfg.RPCURL, "CometBFT JSON-RPC endpoint URL")
 	fs.StringVar(&cfg.GRPCTarget, "grpc-target", cfg.GRPCTarget, "Cosmos gRPC target in host:port form")
 	fs.BoolVar(&cfg.GRPCInsecure, "grpc-insecure", cfg.GRPCInsecure, "use plaintext gRPC instead of TLS")
@@ -70,6 +71,11 @@ func Parse(args []string, getenv Getter) (Config, error) {
 	maxBytes := byteSize(cfg.MaxResponseBytes)
 	fs.Var(&maxBytes, "max-response-bytes", "maximum upstream response size (for example 4MiB)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fs.SetOutput(os.Stdout)
+			fs.Usage()
+			return Config{}, flag.ErrHelp
+		}
 		return Config{}, err
 	}
 	if fs.NArg() != 0 {
