@@ -141,7 +141,10 @@ func TestIsRouteNotFoundTreatsTruncatedBodyAsResourceLevel(t *testing.T) {
 	}
 	_, callErr := client.Get(context.Background(), "/cosmos/gov/v1/proposals/42", nil)
 	var statusErr *HTTPStatusError
-	if !errors.As(callErr, &statusErr) || len(statusErr.Body) != errorBodyLimit {
+	if !errors.As(callErr, &statusErr) {
+		t.Fatalf("expected HTTPStatusError, got %T: %v", callErr, callErr)
+	}
+	if len(statusErr.Body) != errorBodyLimit {
 		t.Fatalf("expected the 404 body to be truncated to %d bytes, got %d, err = %v", errorBodyLimit, len(statusErr.Body), callErr)
 	}
 	if IsRouteNotFound(callErr) {
