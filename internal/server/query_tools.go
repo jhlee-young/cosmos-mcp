@@ -126,8 +126,11 @@ func (s *Server) resolveBalances(ctx context.Context, in balancesInput) (cosmos.
 		})
 		if resolveErr == nil {
 			raw := resolved.Data
-			balance := object(raw)["balance"]
-			resolved.Data = map[string]any{"balances": []any{balance}, "raw": raw}
+			balances := []any{}
+			if balance, ok := object(raw)["balance"]; ok && balance != nil {
+				balances = append(balances, balance)
+			}
+			resolved.Data = map[string]any{"balances": balances, "raw": raw}
 		}
 		return resolved, resolveErr
 	}
