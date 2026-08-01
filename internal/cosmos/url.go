@@ -7,6 +7,9 @@ func RedactedURL(raw string) string {
 	if err != nil || u.Host == "" {
 		return "invalid-url"
 	}
-	redacted := url.URL{Scheme: u.Scheme, Host: u.Host}
-	return redacted.String()
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
 }
