@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -29,11 +30,19 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
+// symbolNotFoundTTL bounds how long a gRPC service confirmed absent by
+// reflection is remembered, so repeated queries for an unsupported module
+// don't pay for a reflection round trip on every call.
+const symbolNotFoundTTL = 5 * time.Minute
+
 type GRPCClient struct {
-	target   string
-	timeout  time.Duration
-	conn     *grpc.ClientConn
-	maxBytes int64
+	target      string
+	timeout     time.Duration
+	conn        *grpc.ClientConn
+	maxBytes    int64
+	mu          sync.RWMutex
+	descriptors map[string]*protoregistry.Files
+	missing     map[string]time.Time
 }
 
 func NewGRPCClient(target string, plaintext bool, timeout time.Duration, maxBytes int64) (*GRPCClient, error) {
@@ -59,7 +68,7 @@ func NewGRPCClient(target string, plaintext bool, timeout time.Duration, maxByte
 	if err != nil {
 		return nil, err
 	}
-	return &GRPCClient{target: target, timeout: timeout, conn: conn, maxBytes: maxBytes}, nil
+	return &GRPCClient{target: target, timeout: timeout, conn: conn, maxBytes: maxBytes, descriptors: make(map[string]*protoregistry.Files), missing: make(map[string]time.Time)}, nil
 }
 
 func (c *GRPCClient) Endpoint() string { return c.target }
@@ -82,6 +91,17 @@ func (c *GRPCClient) Status(ctx context.Context) error {
 }
 
 func (c *GRPCClient) Query(ctx context.Context, fullMethod string, input json.RawMessage) (any, error) {
+	return c.query(ctx, fullMethod, input, false)
+}
+
+// QueryDiscardUnknown invokes a reflected method while projecting the JSON
+// request onto the server's input schema. It is intended for internal
+// compatibility bindings that carry fields from multiple API versions.
+func (c *GRPCClient) QueryDiscardUnknown(ctx context.Context, fullMethod string, input json.RawMessage) (any, error) {
+	return c.query(ctx, fullMethod, input, true)
+}
+
+func (c *GRPCClient) query(ctx context.Context, fullMethod string, input json.RawMessage, discardUnknown bool) (any, error) {
 	fullMethod, serviceName, methodName, err := normalizeGRPCMethod(fullMethod)
 	if err != nil {
 		return nil, err
@@ -114,7 +134,7 @@ func (c *GRPCClient) Query(ctx context.Context, fullMethod string, input json.Ra
 	if len(input) == 0 {
 		input = json.RawMessage(`{}`)
 	}
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(input, request); err != nil {
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: discardUnknown}).Unmarshal(input, request); err != nil {
 		return nil, NewError(CodeInvalidInput, "gRPC request does not match the reflected input schema", err)
 	}
 	response := dynamicpb.NewMessage(method.Output())
@@ -133,6 +153,28 @@ func (c *GRPCClient) Query(ctx context.Context, fullMethod string, input json.Ra
 		return nil, NewError(CodeUpstreamError, "failed to convert gRPC response to JSON", err)
 	}
 	return result, nil
+}
+
+func (c *GRPCClient) HasMethod(ctx context.Context, fullMethod string) (bool, error) {
+	_, serviceName, methodName, err := normalizeGRPCMethod(fullMethod)
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	files, err := c.descriptorsForSymbol(ctx, serviceName)
+	if err != nil {
+		if errorCodeOf(err) == CodeInvalidInput {
+			return false, nil
+		}
+		return false, err
+	}
+	descriptor, err := files.FindDescriptorByName(protoreflect.FullName(serviceName))
+	if err != nil {
+		return false, nil
+	}
+	service, ok := descriptor.(protoreflect.ServiceDescriptor)
+	return ok && service.Methods().ByName(protoreflect.Name(methodName)) != nil, nil
 }
 
 func normalizeGRPCMethod(raw string) (full, service, method string, err error) {
@@ -190,8 +232,26 @@ func (c *GRPCClient) listServices(ctx context.Context) error { //nolint:staticch
 }
 
 func (c *GRPCClient) descriptorsForSymbol(ctx context.Context, symbol string) (*protoregistry.Files, error) {
+	c.mu.RLock()
+	cached := c.descriptors[symbol]
+	missingUntil, isMissing := c.missing[symbol]
+	c.mu.RUnlock()
+	if cached != nil {
+		return cached, nil
+	}
+	if isMissing && time.Now().Before(missingUntil) {
+		return nil, NewError(CodeInvalidInput, "gRPC service was not found by reflection", nil)
+	}
 	raw, err := c.fetchSymbol(ctx, symbol)
 	if err != nil {
+		if errorCodeOf(err) == CodeInvalidInput {
+			c.mu.Lock()
+			if c.missing == nil {
+				c.missing = make(map[string]time.Time)
+			}
+			c.missing[symbol] = time.Now().Add(symbolNotFoundTTL)
+			c.mu.Unlock()
+		}
 		return nil, err
 	}
 	protos := make(map[string]*descriptorpb.FileDescriptorProto)
@@ -240,7 +300,27 @@ func (c *GRPCClient) descriptorsForSymbol(ctx context.Context, symbol string) (*
 			return nil, NewError(CodeUpstreamError, "could not resolve reflected gRPC descriptors", err)
 		}
 	}
+	c.mu.Lock()
+	if c.descriptors == nil {
+		c.descriptors = make(map[string]*protoregistry.Files)
+	}
+	if existing := c.descriptors[symbol]; existing != nil {
+		registry = existing
+	} else {
+		c.descriptors[symbol] = registry
+	}
+	delete(c.missing, symbol)
+	c.mu.Unlock()
 	return registry, nil
+}
+
+func IsGRPCMethodUnavailable(err error) bool {
+	return status.Code(err) == codes.Unimplemented
+}
+
+func errorCodeOf(err error) ErrorCode {
+	code, _ := ErrorDetails(err)
+	return code
 }
 
 func (c *GRPCClient) fetchSymbol(ctx context.Context, symbol string) ([][]byte, error) { //nolint:staticcheck // v1alpha fallback supports legacy Cosmos nodes.
@@ -253,6 +333,9 @@ func (c *GRPCClient) fetchSymbol(ctx context.Context, symbol string) ([][]byte, 
 			if err == nil && response.GetFileDescriptorResponse() != nil {
 				return response.GetFileDescriptorResponse().FileDescriptorProto, nil
 			}
+			if err == nil && response.GetErrorResponse() != nil {
+				err = status.Error(codes.Code(response.GetErrorResponse().GetErrorCode()), response.GetErrorResponse().GetErrorMessage())
+			}
 		}
 	}
 	streamAlpha, alphaErr := reflectionv1alpha.NewServerReflectionClient(c.conn).ServerReflectionInfo(ctx)
@@ -263,6 +346,9 @@ func (c *GRPCClient) fetchSymbol(ctx context.Context, symbol string) ([][]byte, 
 			response, alphaErr = streamAlpha.Recv()
 			if alphaErr == nil && response.GetFileDescriptorResponse() != nil { //nolint:staticcheck // Legacy reflection fallback.
 				return response.GetFileDescriptorResponse().FileDescriptorProto, nil //nolint:staticcheck // Legacy reflection fallback.
+			}
+			if alphaErr == nil && response.GetErrorResponse() != nil { //nolint:staticcheck // Legacy reflection fallback.
+				alphaErr = status.Error(codes.Code(response.GetErrorResponse().GetErrorCode()), response.GetErrorResponse().GetErrorMessage()) //nolint:staticcheck // Legacy reflection fallback.
 			}
 		}
 	}

@@ -56,6 +56,19 @@ func TestGRPCQueryWithReflection(t *testing.T) {
 	if result.(map[string]any)["ok"] != true {
 		t.Fatalf("Query() = %#v", result)
 	}
+	if _, err = client.Query(context.Background(), "/cosmos.mcp.test.v1.Query/Echo", json.RawMessage(`{"new_field":true}`)); errorCode(err) != CodeInvalidInput {
+		t.Fatalf("Query() with unknown field error = %v", err)
+	}
+	result, err = client.QueryDiscardUnknown(context.Background(), "/cosmos.mcp.test.v1.Query/Echo", json.RawMessage(`{"new_field":true}`))
+	if err != nil || result.(map[string]any)["ok"] != true {
+		t.Fatalf("QueryDiscardUnknown() = %#v, %v", result, err)
+	}
+	if ok, methodErr := client.HasMethod(context.Background(), "/cosmos.mcp.test.v1.Query/Echo"); methodErr != nil || !ok {
+		t.Fatalf("HasMethod(Echo) = %v, %v", ok, methodErr)
+	}
+	if ok, methodErr := client.HasMethod(context.Background(), "/cosmos.mcp.test.v1.Query/Missing"); methodErr != nil || ok {
+		t.Fatalf("HasMethod(Missing) = %v, %v", ok, methodErr)
+	}
 	if _, err := client.Query(context.Background(), "/grpc.health.v1.Health/Check", json.RawMessage(`{}`)); errorCode(err) != CodeInvalidInput {
 		t.Fatalf("non-query method error = %v", err)
 	}
@@ -67,6 +80,40 @@ func TestGRPCQueryWithoutReflection(t *testing.T) {
 	_, err := client.Query(context.Background(), "/cosmos.mcp.test.v1.Query/Echo", json.RawMessage(`{}`))
 	if errorCode(err) != CodeGRPCReflectionUnavailable {
 		t.Fatalf("Query() error = %v", err)
+	}
+}
+
+func TestGRPCDescriptorsForSymbolCachesNotFound(t *testing.T) {
+	client, stop := newTestGRPCClient(t, true)
+	defer stop()
+
+	ok, err := client.HasMethod(context.Background(), "/cosmos.mcp.test.v1.NoSuchService/Foo")
+	if err != nil || ok {
+		t.Fatalf("HasMethod() = %v, %v", ok, err)
+	}
+	client.mu.RLock()
+	_, cached := client.missing["cosmos.mcp.test.v1.NoSuchService"]
+	client.mu.RUnlock()
+	if !cached {
+		t.Fatalf("expected the missing service to be cached after reflection confirmed it does not exist")
+	}
+
+	ok, err = client.HasMethod(context.Background(), "/cosmos.mcp.test.v1.NoSuchService/Foo")
+	if err != nil || ok {
+		t.Fatalf("HasMethod() second call = %v, %v", ok, err)
+	}
+}
+
+func TestResolverSelectsAvailableReflectedService(t *testing.T) {
+	client, stop := newTestGRPCClient(t, true)
+	defer stop()
+	resolver := NewResolver(nil, nil, client)
+	result, err := resolver.Resolve(context.Background(), "echo", []Binding{
+		{Name: "new", GRPCMethod: "/cosmos.mcp.test.v2.Query/Echo", GRPCRequest: map[string]any{}},
+		{Name: "legacy", GRPCMethod: "/cosmos.mcp.test.v1.Query/Echo", GRPCRequest: map[string]any{}},
+	})
+	if err != nil || result.Binding != "/cosmos.mcp.test.v1.Query/Echo" || result.Data.(map[string]any)["ok"] != true {
+		t.Fatalf("Resolve() = %#v, %v", result, err)
 	}
 }
 

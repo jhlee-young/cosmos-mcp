@@ -16,19 +16,22 @@ import (
 )
 
 type Server struct {
-	MCP  *mcp.Server
-	rpc  *cosmos.RPCClient
-	lcd  *cosmos.LCDClient
-	grpc *cosmos.GRPCClient
+	MCP   *mcp.Server
+	rpc   *cosmos.RPCClient
+	lcd   *cosmos.LCDClient
+	grpc  *cosmos.GRPCClient
+	query *cosmos.Resolver
 }
 
 type Meta struct {
-	DurationMS int64 `json:"duration_ms"`
+	DurationMS int64  `json:"duration_ms"`
+	Binding    string `json:"binding,omitempty"`
 }
 
 type ToolError struct {
 	Code    cosmos.ErrorCode `json:"code"`
 	Message string           `json:"message"`
+	Details map[string]any   `json:"details,omitempty"`
 }
 
 type ToolResponse struct {
@@ -65,8 +68,56 @@ type rpcQueryInput struct {
 }
 
 type balancesInput struct {
+	Address    string           `json:"address" jsonschema:"Cosmos bech32 account address"`
+	Denom      string           `json:"denom,omitempty" jsonschema:"optional denomination to select one balance"`
+	Pagination *paginationInput `json:"pagination,omitempty"`
+}
+
+type paginationInput struct {
+	Key        string `json:"key,omitempty" jsonschema:"base64 continuation key returned by a previous call"`
+	Offset     uint64 `json:"offset,omitempty"`
+	Limit      uint64 `json:"limit,omitempty" jsonschema:"page size; defaults to 50 and cannot exceed 200"`
+	CountTotal bool   `json:"count_total,omitempty"`
+	Reverse    bool   `json:"reverse,omitempty"`
+}
+
+type addressInput struct {
 	Address string `json:"address" jsonschema:"Cosmos bech32 account address"`
-	Denom   string `json:"denom,omitempty" jsonschema:"optional denomination to select one balance"`
+}
+type denomInput struct {
+	Denom string `json:"denom" jsonschema:"token denomination"`
+}
+type validatorInput struct {
+	ValidatorAddress string `json:"validator_address" jsonschema:"Cosmos validator operator address"`
+}
+type validatorsInput struct {
+	Status     string           `json:"status,omitempty" jsonschema:"optional staking validator status"`
+	Pagination *paginationInput `json:"pagination,omitempty"`
+}
+type delegationsInput struct {
+	DelegatorAddress string           `json:"delegator_address" jsonschema:"Cosmos delegator account address"`
+	Pagination       *paginationInput `json:"pagination,omitempty"`
+}
+type rewardsInput struct {
+	DelegatorAddress string `json:"delegator_address"`
+	ValidatorAddress string `json:"validator_address,omitempty"`
+}
+type proposalsInput struct {
+	Status     string           `json:"status,omitempty"`
+	Voter      string           `json:"voter,omitempty"`
+	Depositor  string           `json:"depositor,omitempty"`
+	Pagination *paginationInput `json:"pagination,omitempty"`
+}
+type proposalInput struct {
+	ProposalID string `json:"proposal_id" jsonschema:"positive decimal proposal identifier"`
+}
+type transactionSearchInput struct {
+	Events     []string         `json:"events" jsonschema:"CometBFT event filters such as message.sender='cosmos1...'"`
+	Order      string           `json:"order,omitempty" jsonschema:"asc or desc"`
+	Pagination *paginationInput `json:"pagination,omitempty" jsonschema:"transaction search supports page-aligned offsets; key and reverse are rejected"`
+}
+type simulationInput struct {
+	TxBytes string `json:"tx_bytes" jsonschema:"base64 protobuf transaction bytes"`
 }
 
 type lcdQueryInput struct {
@@ -107,6 +158,7 @@ func New(cfg config.Config, version string, logger *slog.Logger) (*Server, error
 			return nil, fmt.Errorf("create gRPC client: %w", err)
 		}
 	}
+	result.query = cosmos.NewResolver(result.rpc, result.lcd, result.grpc)
 	result.MCP = mcp.NewServer(&mcp.Implementation{Name: "cosmos-mcp", Version: version}, &mcp.ServerOptions{
 		Instructions: "Read-only access to the configured Cosmos SDK RPC, gRPC, and LCD endpoints. Only tools backed by configured endpoints are exposed.",
 		Logger:       logger,
@@ -129,14 +181,33 @@ func (s *Server) Close() error {
 
 func (s *Server) registerTools() {
 	mcp.AddTool(s.MCP, tool("endpoint_status", "Check which Cosmos endpoints are configured and whether each is currently reachable."), s.endpointStatus)
+	if s.rpc != nil || s.grpc != nil || s.lcd != nil {
+		mcp.AddTool(s.MCP, tool("chain_status", "Return chain ID, node information, and sync state using an available endpoint."), s.chainStatus)
+		mcp.AddTool(s.MCP, tool("get_block", "Get the latest block or a block at a specified height using an available endpoint."), s.getBlock)
+		mcp.AddTool(s.MCP, tool("get_transaction", "Get a transaction and its execution result by hexadecimal hash."), s.getTransaction)
+	}
 	if s.rpc != nil {
-		mcp.AddTool(s.MCP, tool("chain_status", "[RPC] Return chain ID, latest block information, sync state, and node version."), s.chainStatus)
-		mcp.AddTool(s.MCP, tool("get_block", "[RPC] Get the latest CometBFT block or a block at a specified height."), s.getBlock)
-		mcp.AddTool(s.MCP, tool("get_transaction", "[RPC] Get a transaction and its execution result by hexadecimal hash."), s.getTransaction)
 		mcp.AddTool(s.MCP, tool("rpc_query", "[RPC] Call an allowlisted read-only CometBFT JSON-RPC method on the configured endpoint."), s.rpcQuery)
 	}
+	if s.lcd != nil || s.grpc != nil {
+		mcp.AddTool(s.MCP, tool("get_account", "Get a Cosmos account and its sequence information."), s.getAccount)
+		mcp.AddTool(s.MCP, tool("get_balances", "Get all balances for a Cosmos account or select one denomination."), s.getBalances)
+		mcp.AddTool(s.MCP, tool("get_token_info", "Get token supply and denomination metadata."), s.getTokenInfo)
+		mcp.AddTool(s.MCP, tool("get_validators", "Get staking validators."), s.getValidators)
+		mcp.AddTool(s.MCP, tool("get_validator", "Get one staking validator."), s.getValidator)
+		mcp.AddTool(s.MCP, tool("get_delegations", "Get delegations for an account."), s.getDelegations)
+		mcp.AddTool(s.MCP, tool("get_unbonding_delegations", "Get unbonding delegations for an account."), s.getUnbondingDelegations)
+		mcp.AddTool(s.MCP, tool("get_rewards", "Get delegation rewards for an account."), s.getRewards)
+		mcp.AddTool(s.MCP, tool("get_proposals", "Get governance proposals."), s.getProposals)
+		mcp.AddTool(s.MCP, tool("get_proposal", "Get one governance proposal."), s.getProposal)
+	}
+	if s.rpc != nil || s.lcd != nil || s.grpc != nil {
+		mcp.AddTool(s.MCP, tool("search_transactions", "Search transactions using CometBFT event filters."), s.searchTransactions)
+	}
+	if s.grpc != nil {
+		mcp.AddTool(s.MCP, tool("simulate_transaction", "Simulate base64 protobuf transaction bytes without broadcasting."), s.simulateTransaction)
+	}
 	if s.lcd != nil {
-		mcp.AddTool(s.MCP, tool("get_balances", "[LCD] Get all balances for a Cosmos account or select one denomination."), s.getBalances)
 		mcp.AddTool(s.MCP, tool("lcd_query", "[LCD] Perform a read-only GET against a relative path on the configured endpoint."), s.lcdQuery)
 	}
 	if s.grpc != nil {
@@ -230,11 +301,8 @@ func stateFor(endpoint string, err error) EndpointState {
 
 func (s *Server) chainStatus(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, ToolResponse, error) {
 	started := time.Now()
-	data, err := s.rpc.Status(ctx)
-	if err == nil {
-		data = summarizeChainStatus(data)
-	}
-	return response(started, "rpc", map[string]any{"method": "status"}, data, err)
+	resolved, err := s.resolveChainStatus(ctx)
+	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{}, resolved.Data, err)
 }
 
 func summarizeChainStatus(data any) any {
@@ -257,14 +325,14 @@ func summarizeChainStatus(data any) any {
 
 func (s *Server) getBlock(ctx context.Context, _ *mcp.CallToolRequest, in blockInput) (*mcp.CallToolResult, ToolResponse, error) {
 	started := time.Now()
-	data, err := s.rpc.Block(ctx, in.Height)
-	return response(started, "rpc", map[string]any{"method": "block", "height": in.Height}, data, err)
+	resolved, err := s.resolveBlock(ctx, in.Height)
+	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"height": in.Height}, resolved.Data, err)
 }
 
 func (s *Server) getTransaction(ctx context.Context, _ *mcp.CallToolRequest, in transactionInput) (*mcp.CallToolResult, ToolResponse, error) {
 	started := time.Now()
-	data, err := s.rpc.Transaction(ctx, in.Hash)
-	return response(started, "rpc", map[string]any{"method": "tx", "hash": in.Hash}, data, err)
+	resolved, err := s.resolveTransaction(ctx, in.Hash)
+	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"hash": in.Hash}, resolved.Data, err)
 }
 
 func (s *Server) rpcQuery(ctx context.Context, _ *mcp.CallToolRequest, in rpcQueryInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -275,8 +343,8 @@ func (s *Server) rpcQuery(ctx context.Context, _ *mcp.CallToolRequest, in rpcQue
 
 func (s *Server) getBalances(ctx context.Context, _ *mcp.CallToolRequest, in balancesInput) (*mcp.CallToolResult, ToolResponse, error) {
 	started := time.Now()
-	data, err := s.lcd.Balances(ctx, in.Address, in.Denom)
-	return response(started, "lcd", map[string]any{"address": in.Address, "denom": in.Denom}, data, err)
+	resolved, err := s.resolveBalances(ctx, in)
+	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"address": in.Address, "denom": in.Denom, "pagination": in.Pagination}, resolved.Data, err)
 }
 
 func (s *Server) lcdQuery(ctx context.Context, _ *mcp.CallToolRequest, in lcdQueryInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -296,11 +364,18 @@ func (s *Server) grpcQuery(ctx context.Context, _ *mcp.CallToolRequest, in grpcQ
 }
 
 func response(started time.Time, source string, request map[string]any, data any, err error) (*mcp.CallToolResult, ToolResponse, error) {
-	out := ToolResponse{Source: source, Request: request, Data: data, Meta: Meta{DurationMS: time.Since(started).Milliseconds()}}
+	return responseBound(started, source, "", request, data, err)
+}
+
+func responseBound(started time.Time, source, binding string, request map[string]any, data any, err error) (*mcp.CallToolResult, ToolResponse, error) {
+	if source == "" {
+		source = "system"
+	}
+	out := ToolResponse{Source: source, Request: request, Data: data, Meta: Meta{DurationMS: time.Since(started).Milliseconds(), Binding: binding}}
 	result := &mcp.CallToolResult{}
 	if err != nil {
 		code, message := cosmos.ErrorDetails(err)
-		out.Error = &ToolError{Code: code, Message: message}
+		out.Error = &ToolError{Code: code, Message: message, Details: cosmos.ErrorDetailsMap(err)}
 		out.Data = nil
 		result.IsError = true
 	}

@@ -21,10 +21,10 @@ func TestToolsFollowConfiguredEndpoints(t *testing.T) {
 		cfg  config.Config
 		want []string
 	}{
-		{name: "rpc", cfg: testConfig("rpc"), want: []string{"chain_status", "endpoint_status", "get_block", "get_transaction", "rpc_query"}},
-		{name: "lcd", cfg: testConfig("lcd"), want: []string{"endpoint_status", "get_balances", "lcd_query"}},
-		{name: "grpc", cfg: testConfig("grpc"), want: []string{"endpoint_status", "grpc_query"}},
-		{name: "all", cfg: testConfig("rpc", "lcd", "grpc"), want: []string{"chain_status", "endpoint_status", "get_balances", "get_block", "get_transaction", "grpc_query", "lcd_query", "rpc_query"}},
+		{name: "rpc", cfg: testConfig("rpc"), want: []string{"chain_status", "endpoint_status", "get_block", "get_transaction", "rpc_query", "search_transactions"}},
+		{name: "lcd", cfg: testConfig("lcd"), want: []string{"chain_status", "endpoint_status", "get_account", "get_balances", "get_block", "get_delegations", "get_proposal", "get_proposals", "get_rewards", "get_token_info", "get_transaction", "get_unbonding_delegations", "get_validator", "get_validators", "lcd_query", "search_transactions"}},
+		{name: "grpc", cfg: testConfig("grpc"), want: []string{"chain_status", "endpoint_status", "get_account", "get_balances", "get_block", "get_delegations", "get_proposal", "get_proposals", "get_rewards", "get_token_info", "get_transaction", "get_unbonding_delegations", "get_validator", "get_validators", "grpc_query", "search_transactions", "simulate_transaction"}},
+		{name: "all", cfg: testConfig("rpc", "lcd", "grpc"), want: []string{"chain_status", "endpoint_status", "get_account", "get_balances", "get_block", "get_delegations", "get_proposal", "get_proposals", "get_rewards", "get_token_info", "get_transaction", "get_unbonding_delegations", "get_validator", "get_validators", "grpc_query", "lcd_query", "rpc_query", "search_transactions", "simulate_transaction"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

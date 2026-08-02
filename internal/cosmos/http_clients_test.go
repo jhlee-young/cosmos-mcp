@@ -3,8 +3,10 @@ package cosmos
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,4 +76,78 @@ func TestRedactedURL(t *testing.T) {
 func errorCode(err error) ErrorCode {
 	code, _ := ErrorDetails(err)
 	return code
+}
+
+func TestIsRouteNotFoundGenericGRPCGatewayMiss(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":5,"message":"Not Found","details":[]}`))
+	}))
+	defer upstream.Close()
+	client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.Get(context.Background(), "/missing/route", nil)
+	if !IsRouteNotFound(callErr) {
+		t.Fatalf("IsRouteNotFound() = false for generic grpc-gateway routing miss, err = %v", callErr)
+	}
+}
+
+func TestIsRouteNotFoundPreservesResourceLevelMiss(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":5,"message":"proposal 42 doesn't exist: key not found","details":[]}`))
+	}))
+	defer upstream.Close()
+	client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.Get(context.Background(), "/cosmos/gov/v1/proposals/42", nil)
+	if IsRouteNotFound(callErr) {
+		t.Fatalf("IsRouteNotFound() = true for a resource-level 404 that identifies the queried resource, err = %v", callErr)
+	}
+	if errorCode(callErr) != CodeUpstreamError {
+		t.Fatalf("resource-level 404 error code = %v, want CodeUpstreamError", errorCode(callErr))
+	}
+}
+
+func TestIsRouteNotFoundPlainTextRouterMiss(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r) // plain "404 page not found" text, as from a router/proxy in front of the app
+	}))
+	defer upstream.Close()
+	client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.Get(context.Background(), "/anything", nil)
+	if !IsRouteNotFound(callErr) {
+		t.Fatalf("IsRouteNotFound() = false for a plain-text router 404, err = %v", callErr)
+	}
+}
+
+func TestIsRouteNotFoundTreatsTruncatedBodyAsResourceLevel(t *testing.T) {
+	longMessage := `proposal 42 doesn't exist: key not found: ` + strings.Repeat("x", errorBodyLimit)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 5, "message": longMessage, "details": []any{}})
+	}))
+	defer upstream.Close()
+	client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.Get(context.Background(), "/cosmos/gov/v1/proposals/42", nil)
+	var statusErr *HTTPStatusError
+	if !errors.As(callErr, &statusErr) {
+		t.Fatalf("expected HTTPStatusError, got %T: %v", callErr, callErr)
+	}
+	if len(statusErr.Body) != errorBodyLimit {
+		t.Fatalf("expected the 404 body to be truncated to %d bytes, got %d, err = %v", errorBodyLimit, len(statusErr.Body), callErr)
+	}
+	if IsRouteNotFound(callErr) {
+		t.Fatalf("IsRouteNotFound() = true for a 404 body truncated at the %d byte limit; a truncated body must never be mistaken for the short generic routing-miss message", errorBodyLimit)
+	}
 }

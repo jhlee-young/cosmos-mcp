@@ -31,7 +31,7 @@ func TestStdioSubprocessListsConfiguredTools(t *testing.T) {
 		got = append(got, item.Name)
 	}
 	slices.Sort(got)
-	want := []string{"chain_status", "endpoint_status", "get_block", "get_transaction", "rpc_query"}
+	want := []string{"chain_status", "endpoint_status", "get_block", "get_transaction", "rpc_query", "search_transactions"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("tools = %v, want %v", got, want)
 	}
