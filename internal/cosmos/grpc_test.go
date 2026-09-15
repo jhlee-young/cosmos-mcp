@@ -10,6 +10,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
@@ -29,10 +30,22 @@ type testQueryServer interface {
 	Echo(context.Context, *emptypb.Empty) (*structpb.Struct, error)
 }
 
-type testQueryImplementation struct{}
+// testQueryImplementation echoes back the historical-height metadata it
+// received so tests can assert how the client propagated it, and can be primed
+// with an error to exercise gRPC status-code handling.
+type testQueryImplementation struct{ err error }
 
-func (testQueryImplementation) Echo(context.Context, *emptypb.Empty) (*structpb.Struct, error) {
-	return structpb.NewStruct(map[string]any{"ok": true})
+func (t testQueryImplementation) Echo(ctx context.Context, _ *emptypb.Empty) (*structpb.Struct, error) {
+	if t.err != nil {
+		return nil, t.err
+	}
+	height := ""
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if values := md.Get(HeightHeader); len(values) > 0 {
+			height = values[0]
+		}
+	}
+	return structpb.NewStruct(map[string]any{"ok": true, "height": height})
 }
 
 func TestGRPCQueryWithReflection(t *testing.T) {
@@ -117,7 +130,7 @@ func TestResolverSelectsAvailableReflectedService(t *testing.T) {
 	}
 }
 
-func newTestGRPCClient(t *testing.T, withReflection bool) (*GRPCClient, func()) {
+func newTestGRPCClient(t *testing.T, withReflection bool, serverErr ...error) (*GRPCClient, func()) {
 	t.Helper()
 	var registerTestDescriptorErr error
 
@@ -170,7 +183,7 @@ func newTestGRPCClient(t *testing.T, withReflection bool) (*GRPCClient, func()) 
 			},
 		}},
 		Metadata: testQueryFile,
-	}, testQueryImplementation{})
+	}, testQueryImplementation{err: firstOrNil(serverErr)})
 	if withReflection {
 		reflection.Register(grpcServer)
 	}

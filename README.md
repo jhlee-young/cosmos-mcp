@@ -143,6 +143,11 @@ Hermes prefixes discovered tools with the MCP server name, such as `mcp_cosmos_c
 | LCD | `lcd_query` |
 | gRPC | `grpc_query`, `simulate_transaction` |
 
+Every tool in the LCD-or-gRPC row accepts an optional `height` to read historical state. It is sent as the
+`x-cosmos-block-height` header, which gRPC carries as request metadata and the LCD forwards through
+grpc-gateway. A node that has pruned the height rejects the query instead of answering from current
+state, and that rejection is returned as-is rather than retried against an older API version.
+
 High-level tools resolve the best API lazily at call time instead of relying on a reported Cosmos SDK version. They prefer current gRPC services, fall back to legacy service versions and LCD routes when an API is absent, and cache successful bindings. Temporary endpoint failures, authentication failures, rate limits, and server errors do not trigger a version fallback. gRPC high-level queries require server reflection unless an LCD fallback is configured.
 
 List tools use a default page size of 50 and enforce a maximum of 200. Module queries return a continuation key instead of automatically fetching every page; `search_transactions` uses page-aligned offsets and rejects key or reverse pagination. Normalized high-level results include the original upstream response under `raw`; `meta.binding` reports the selected gRPC method, LCD route, or RPC method.

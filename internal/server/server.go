@@ -67,10 +67,18 @@ type rpcQueryInput struct {
 	Params map[string]any `json:"params,omitempty" jsonschema:"JSON-RPC method parameters"`
 }
 
+// heightInput is embedded rather than repeated so that every state query
+// accepts the same historical-height field; encoding/json and the MCP SDK's
+// schema inference both promote embedded struct fields to the top level.
+type heightInput struct {
+	Height string `json:"height,omitempty" jsonschema:"optional past block height as a positive decimal string; omit to read current state. The node must retain the height or the query is rejected."`
+}
+
 type balancesInput struct {
 	Address    string           `json:"address" jsonschema:"Cosmos bech32 account address"`
 	Denom      string           `json:"denom,omitempty" jsonschema:"optional denomination to select one balance"`
 	Pagination *paginationInput `json:"pagination,omitempty"`
+	heightInput
 }
 
 type paginationInput struct {
@@ -83,33 +91,41 @@ type paginationInput struct {
 
 type addressInput struct {
 	Address string `json:"address" jsonschema:"Cosmos bech32 account address"`
+	heightInput
 }
 type denomInput struct {
 	Denom string `json:"denom" jsonschema:"token denomination"`
+	heightInput
 }
 type validatorInput struct {
 	ValidatorAddress string `json:"validator_address" jsonschema:"Cosmos validator operator address"`
+	heightInput
 }
 type validatorsInput struct {
 	Status     string           `json:"status,omitempty" jsonschema:"optional staking validator status"`
 	Pagination *paginationInput `json:"pagination,omitempty"`
+	heightInput
 }
 type delegationsInput struct {
 	DelegatorAddress string           `json:"delegator_address" jsonschema:"Cosmos delegator account address"`
 	Pagination       *paginationInput `json:"pagination,omitempty"`
+	heightInput
 }
 type rewardsInput struct {
 	DelegatorAddress string `json:"delegator_address"`
 	ValidatorAddress string `json:"validator_address,omitempty"`
+	heightInput
 }
 type proposalsInput struct {
 	Status     string           `json:"status,omitempty"`
 	Voter      string           `json:"voter,omitempty"`
 	Depositor  string           `json:"depositor,omitempty"`
 	Pagination *paginationInput `json:"pagination,omitempty"`
+	heightInput
 }
 type proposalInput struct {
 	ProposalID string `json:"proposal_id" jsonschema:"positive decimal proposal identifier"`
+	heightInput
 }
 type transactionSearchInput struct {
 	Events     []string         `json:"events" jsonschema:"CometBFT event filters such as message.sender='cosmos1...'"`
@@ -344,7 +360,7 @@ func (s *Server) rpcQuery(ctx context.Context, _ *mcp.CallToolRequest, in rpcQue
 func (s *Server) getBalances(ctx context.Context, _ *mcp.CallToolRequest, in balancesInput) (*mcp.CallToolResult, ToolResponse, error) {
 	started := time.Now()
 	resolved, err := s.resolveBalances(ctx, in)
-	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"address": in.Address, "denom": in.Denom, "pagination": in.Pagination}, resolved.Data, err)
+	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"address": in.Address, "denom": in.Denom, "pagination": in.Pagination, "height": in.Height}, resolved.Data, err)
 }
 
 func (s *Server) lcdQuery(ctx context.Context, _ *mcp.CallToolRequest, in lcdQueryInput) (*mcp.CallToolResult, ToolResponse, error) {

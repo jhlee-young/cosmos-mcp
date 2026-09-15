@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/metadata"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/grpc/status"
@@ -138,7 +139,11 @@ func (c *GRPCClient) query(ctx context.Context, fullMethod string, input json.Ra
 		return nil, NewError(CodeInvalidInput, "gRPC request does not match the reflected input schema", err)
 	}
 	response := dynamicpb.NewMessage(method.Output())
-	if err := c.conn.Invoke(ctx, fullMethod, request, response); err != nil {
+	callCtx := ctx
+	if height := heightFrom(ctx); height != "" {
+		callCtx = metadata.AppendToOutgoingContext(ctx, HeightHeader, height)
+	}
+	if err := c.conn.Invoke(callCtx, fullMethod, request, response); err != nil {
 		return nil, mapGRPCError(err)
 	}
 	encoded, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(response)

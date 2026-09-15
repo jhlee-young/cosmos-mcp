@@ -68,6 +68,9 @@ func (c *LCDClient) GetMulti(ctx context.Context, requestPath string, query map[
 	if err != nil {
 		return nil, NewError(CodeInvalidInput, "failed to build LCD request", err)
 	}
+	if height := heightFrom(ctx); height != "" {
+		req.Header.Set(HeightHeader, height)
+	}
 	var result any
 	if err := c.http.DoJSON(ctx, req, &result); err != nil {
 		return nil, err
