@@ -71,9 +71,23 @@ func (e *HTTPStatusError) Error() string {
 // fixed routing-miss body is only a few dozen bytes and can never be cut by
 // the errorBodyLimit truncation in DoJSON, so a parse failure here can only
 // mean a legitimate, likely larger, app error got truncated.
+//
+// An HTTP 501 counts as a route miss too. When a chain drops a method that
+// grpc-gateway still has a pattern for, the gateway answers 501 with gRPC code
+// 12 (Unimplemented) instead of 404 - this is what ibc-go v9 chains return for
+// the /denom_traces route it replaced with /denoms. Treating it as absent
+// mirrors how Unimplemented already ends a binding attempt on the gRPC path,
+// and it cannot mask a transient fault the way a broader rule would: 501 has
+// no "try again later" reading, which is 429 or 503.
 func IsRouteNotFound(err error) bool {
 	var statusErr *HTTPStatusError
-	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	if statusErr.StatusCode == http.StatusNotImplemented {
+		return true
+	}
+	if statusErr.StatusCode != http.StatusNotFound {
 		return false
 	}
 	body := strings.TrimSpace(statusErr.Body)

@@ -138,7 +138,7 @@ Hermes prefixes discovered tools with the MCP server name, such as `mcp_cosmos_c
 | Required endpoint | Tools |
 | --- | --- |
 | Any RPC, LCD, or gRPC | `chain_status`, `get_block`, `get_transaction`, `search_transactions` |
-| LCD or gRPC | `get_account`, `get_balances`, `get_token_info`, `get_validators`, `get_validator`, `get_delegations`, `get_unbonding_delegations`, `get_rewards`, `get_proposals`, `get_proposal` |
+| LCD or gRPC | `get_account`, `get_balances`, `get_token_info`, `get_total_supply`, `get_denom_trace`, `get_validators`, `get_validator`, `get_validator_delegations`, `get_delegations`, `get_unbonding_delegations`, `get_redelegations`, `get_rewards`, `get_staking_pool`, `get_signing_infos`, `get_community_pool`, `get_inflation`, `get_proposals`, `get_proposal`, `get_proposal_tally`, `get_proposal_votes`, `get_proposal_deposits`, `get_staking_params`, `get_gov_params`, `get_distribution_params`, `get_mint_params`, `get_slashing_params`, `get_bank_params` |
 | RPC | `rpc_query` |
 | LCD | `lcd_query` |
 | gRPC | `grpc_query`, `simulate_transaction` |
@@ -149,6 +149,8 @@ grpc-gateway. A node that has pruned the height rejects the query instead of ans
 state, and that rejection is returned as-is rather than retried against an older API version.
 
 High-level tools resolve the best API lazily at call time instead of relying on a reported Cosmos SDK version. They prefer current gRPC services, fall back to legacy service versions and LCD routes when an API is absent, and cache successful bindings. Temporary endpoint failures, authentication failures, rate limits, and server errors do not trigger a version fallback. gRPC high-level queries require server reflection unless an LCD fallback is configured.
+
+Governance tools try `cosmos.gov.v1` before `cosmos.gov.v1beta1`, and `get_denom_trace` tries the ibc-go v8 `DenomTrace` route before the v9 `Denom` rename. `get_inflation` and `get_token_info` combine independent queries and report a `warnings` array when only part of the result is available; chains that replaced the standard `x/mint` return `unsupported_capability` for `get_inflation`. `get_token_info` additionally resolves the transfer path when given an `ibc/` denomination.
 
 List tools use a default page size of 50 and enforce a maximum of 200. Module queries return a continuation key instead of automatically fetching every page; `search_transactions` uses page-aligned offsets and rejects key or reverse pagination. Normalized high-level results include the original upstream response under `raw`; `meta.binding` reports the selected gRPC method, LCD route, or RPC method.
 

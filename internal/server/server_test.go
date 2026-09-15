@@ -15,16 +15,37 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// anyEndpointTools are exposed whenever at least one endpoint is configured;
+// stateQueryTools additionally need a module query API, which only LCD and gRPC
+// provide.
+var (
+	anyEndpointTools = []string{"chain_status", "endpoint_status", "get_block", "get_transaction", "search_transactions"}
+	stateQueryTools  = []string{
+		"get_account", "get_balances", "get_bank_params", "get_community_pool", "get_delegations",
+		"get_denom_trace", "get_distribution_params", "get_gov_params", "get_inflation", "get_mint_params",
+		"get_proposal", "get_proposal_deposits", "get_proposal_tally", "get_proposal_votes", "get_proposals",
+		"get_redelegations", "get_rewards", "get_signing_infos", "get_slashing_params", "get_staking_params",
+		"get_staking_pool", "get_token_info", "get_total_supply", "get_unbonding_delegations",
+		"get_validator", "get_validator_delegations", "get_validators",
+	}
+)
+
+func expectTools(extra ...string) []string {
+	want := slices.Concat(anyEndpointTools, extra)
+	slices.Sort(want)
+	return want
+}
+
 func TestToolsFollowConfiguredEndpoints(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  config.Config
 		want []string
 	}{
-		{name: "rpc", cfg: testConfig("rpc"), want: []string{"chain_status", "endpoint_status", "get_block", "get_transaction", "rpc_query", "search_transactions"}},
-		{name: "lcd", cfg: testConfig("lcd"), want: []string{"chain_status", "endpoint_status", "get_account", "get_balances", "get_block", "get_delegations", "get_proposal", "get_proposals", "get_rewards", "get_token_info", "get_transaction", "get_unbonding_delegations", "get_validator", "get_validators", "lcd_query", "search_transactions"}},
-		{name: "grpc", cfg: testConfig("grpc"), want: []string{"chain_status", "endpoint_status", "get_account", "get_balances", "get_block", "get_delegations", "get_proposal", "get_proposals", "get_rewards", "get_token_info", "get_transaction", "get_unbonding_delegations", "get_validator", "get_validators", "grpc_query", "search_transactions", "simulate_transaction"}},
-		{name: "all", cfg: testConfig("rpc", "lcd", "grpc"), want: []string{"chain_status", "endpoint_status", "get_account", "get_balances", "get_block", "get_delegations", "get_proposal", "get_proposals", "get_rewards", "get_token_info", "get_transaction", "get_unbonding_delegations", "get_validator", "get_validators", "grpc_query", "lcd_query", "rpc_query", "search_transactions", "simulate_transaction"}},
+		{name: "rpc", cfg: testConfig("rpc"), want: expectTools("rpc_query")},
+		{name: "lcd", cfg: testConfig("lcd"), want: expectTools(append(slices.Clone(stateQueryTools), "lcd_query")...)},
+		{name: "grpc", cfg: testConfig("grpc"), want: expectTools(append(slices.Clone(stateQueryTools), "grpc_query", "simulate_transaction")...)},
+		{name: "all", cfg: testConfig("rpc", "lcd", "grpc"), want: expectTools(append(slices.Clone(stateQueryTools), "grpc_query", "lcd_query", "rpc_query", "simulate_transaction")...)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
