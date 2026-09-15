@@ -19,6 +19,37 @@ const (
 	maxPageLimit     = uint64(200)
 )
 
+// heightContext validates an optional historical block height and pins every
+// LCD and gRPC read made with the returned context to it.
+func heightContext(ctx context.Context, height string) (context.Context, error) {
+	if height == "" {
+		return ctx, nil
+	}
+	if value, err := strconv.ParseUint(height, 10, 64); err != nil || value == 0 {
+		return nil, cosmos.NewError(cosmos.CodeInvalidInput, "height must be a positive decimal string", err)
+	}
+	return cosmos.WithHeight(ctx, height), nil
+}
+
+// simpleQuery runs the height -> resolve -> normalize -> respond path shared by
+// the module queries. A non-empty listKey selects list normalization, which
+// also surfaces the continuation key; otherwise keys are lifted as plain fields.
+func (s *Server) simpleQuery(ctx context.Context, started time.Time, capability, height string, request map[string]any, bindings []cosmos.Binding, listKey string, keys ...string) (*mcp.CallToolResult, ToolResponse, error) {
+	ctx, err := heightContext(ctx, height)
+	if err != nil {
+		return response(started, "system", request, nil, err)
+	}
+	resolved, err := s.query.Resolve(ctx, capability, bindings)
+	if err == nil {
+		if listKey != "" {
+			resolved.Data = normalizeList(resolved.Data, listKey)
+		} else {
+			resolved.Data = normalizeFields(resolved.Data, keys...)
+		}
+	}
+	return responseBound(started, resolved.Source, resolved.Binding, request, resolved.Data, err)
+}
+
 func (s *Server) resolveChainStatus(ctx context.Context) (cosmos.Resolution, error) {
 	resolved, err := s.query.Resolve(ctx, "chain_status", []cosmos.Binding{
 		{Name: "rpc:status", RPCMethod: "status", RPCParams: map[string]any{}},
@@ -100,18 +131,18 @@ func (s *Server) getAccount(ctx context.Context, _ *mcp.CallToolRequest, in addr
 	if err != nil {
 		return response(started, "system", map[string]any{"address": in.Address}, nil, err)
 	}
-	resolved, err := s.query.Resolve(ctx, "account", []cosmos.Binding{
+	return s.simpleQuery(ctx, started, "account", in.Height, map[string]any{"address": address, "height": in.Height}, []cosmos.Binding{
 		{Name: "grpc:auth_account", GRPCMethod: "/cosmos.auth.v1beta1.Query/Account", GRPCRequest: map[string]any{"address": address}},
 		{Name: "lcd:auth_account", LCDPath: "/cosmos/auth/v1beta1/accounts/" + url.PathEscape(address)},
-	})
-	if err == nil {
-		resolved.Data = normalizeFields(resolved.Data, "account")
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"address": address}, resolved.Data, err)
+	}, "", "account")
 }
 
 func (s *Server) resolveBalances(ctx context.Context, in balancesInput) (cosmos.Resolution, error) {
 	address, err := safeValue(in.Address, "address")
+	if err != nil {
+		return cosmos.Resolution{}, err
+	}
+	ctx, err = heightContext(ctx, in.Height)
 	if err != nil {
 		return cosmos.Resolution{}, err
 	}
@@ -154,6 +185,10 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	if err != nil {
 		return response(started, "system", map[string]any{"denom": in.Denom}, nil, err)
 	}
+	ctx, err = heightContext(ctx, in.Height)
+	if err != nil {
+		return response(started, "system", map[string]any{"denom": in.Denom, "height": in.Height}, nil, err)
+	}
 	supply, supplyErr := s.query.Resolve(ctx, "token_supply", []cosmos.Binding{
 		{Name: "grpc:supply", GRPCMethod: "/cosmos.bank.v1beta1.Query/SupplyOf", GRPCRequest: map[string]any{"denom": denom}},
 		{Name: "lcd:supply", LCDPath: "/cosmos/bank/v1beta1/supply/by_denom", LCDQuery: map[string]string{"denom": denom}},
@@ -191,7 +226,7 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	if len(warnings) > 0 {
 		data["warnings"] = warnings
 	}
-	return responseBound(started, commonSource(sources), strings.Join(bindings, ";"), map[string]any{"denom": denom}, data, nil)
+	return responseBound(started, commonSource(sources), strings.Join(bindings, ";"), map[string]any{"denom": denom, "height": in.Height}, data, nil)
 }
 
 func (s *Server) getValidators(ctx context.Context, _ *mcp.CallToolRequest, in validatorsInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -205,14 +240,10 @@ func (s *Server) getValidators(ctx context.Context, _ *mcp.CallToolRequest, in v
 		request["status"] = in.Status
 		lcdPage["status"] = in.Status
 	}
-	resolved, err := s.query.Resolve(ctx, "staking_validators", []cosmos.Binding{
+	return s.simpleQuery(ctx, started, "staking_validators", in.Height, map[string]any{"status": in.Status, "pagination": in.Pagination, "height": in.Height}, []cosmos.Binding{
 		{Name: "grpc:staking_validators", GRPCMethod: "/cosmos.staking.v1beta1.Query/Validators", GRPCRequest: request},
 		{Name: "lcd:staking_validators", LCDPath: "/cosmos/staking/v1beta1/validators", LCDQuery: lcdPage},
-	})
-	if err == nil {
-		resolved.Data = normalizeList(resolved.Data, "validators")
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"status": in.Status, "pagination": in.Pagination}, resolved.Data, err)
+	}, "validators")
 }
 
 func (s *Server) getValidator(ctx context.Context, _ *mcp.CallToolRequest, in validatorInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -221,14 +252,10 @@ func (s *Server) getValidator(ctx context.Context, _ *mcp.CallToolRequest, in va
 	if err != nil {
 		return response(started, "system", map[string]any{}, nil, err)
 	}
-	resolved, err := s.query.Resolve(ctx, "staking_validator", []cosmos.Binding{
+	return s.simpleQuery(ctx, started, "staking_validator", in.Height, map[string]any{"validator_address": address, "height": in.Height}, []cosmos.Binding{
 		{Name: "grpc:staking_validator", GRPCMethod: "/cosmos.staking.v1beta1.Query/Validator", GRPCRequest: map[string]any{"validator_addr": address}},
 		{Name: "lcd:staking_validator", LCDPath: "/cosmos/staking/v1beta1/validators/" + url.PathEscape(address)},
-	})
-	if err == nil {
-		resolved.Data = normalizeFields(resolved.Data, "validator")
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"validator_address": address}, resolved.Data, err)
+	}, "", "validator")
 }
 
 func (s *Server) getDelegations(ctx context.Context, _ *mcp.CallToolRequest, in delegationsInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -256,14 +283,10 @@ func (s *Server) delegationQuery(ctx context.Context, in delegationsInput, unbon
 	} else {
 		path += url.PathEscape(address)
 	}
-	resolved, err := s.query.Resolve(ctx, capability, []cosmos.Binding{
+	return s.simpleQuery(ctx, started, capability, in.Height, map[string]any{"delegator_address": address, "pagination": in.Pagination, "height": in.Height}, []cosmos.Binding{
 		{Name: "grpc:" + capability, GRPCMethod: "/cosmos.staking.v1beta1.Query/" + method, GRPCRequest: map[string]any{"delegator_addr": address, "pagination": grpcPage}},
 		{Name: "lcd:" + capability, LCDPath: path, LCDQuery: lcdPage},
-	})
-	if err == nil {
-		resolved.Data = normalizeList(resolved.Data, key)
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"delegator_address": address, "pagination": in.Pagination}, resolved.Data, err)
+	}, key)
 }
 
 func (s *Server) getRewards(ctx context.Context, _ *mcp.CallToolRequest, in rewardsInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -285,14 +308,12 @@ func (s *Server) getRewards(ctx context.Context, _ *mcp.CallToolRequest, in rewa
 		path += "/" + url.PathEscape(validator)
 		keys = []string{"rewards"}
 	}
-	resolved, err := s.query.Resolve(ctx, capability, []cosmos.Binding{
+	echo := map[string]any{"height": in.Height}
+	maps.Copy(echo, request)
+	return s.simpleQuery(ctx, started, capability, in.Height, echo, []cosmos.Binding{
 		{Name: "grpc:" + capability, GRPCMethod: "/cosmos.distribution.v1beta1.Query/" + method, GRPCRequest: request},
 		{Name: "lcd:" + capability, LCDPath: path},
-	})
-	if err == nil {
-		resolved.Data = normalizeFields(resolved.Data, keys...)
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, request, resolved.Data, err)
+	}, "", keys...)
 }
 
 func (s *Server) getProposals(ctx context.Context, _ *mcp.CallToolRequest, in proposalsInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -314,16 +335,14 @@ func (s *Server) getProposals(ctx context.Context, _ *mcp.CallToolRequest, in pr
 		request["depositor"] = in.Depositor
 		lcdPage["depositor"] = in.Depositor
 	}
-	resolved, err := s.query.Resolve(ctx, "governance_proposals", []cosmos.Binding{
-		{Name: "grpc:gov_v1_proposals", GRPCMethod: "/cosmos.gov.v1.Query/Proposals", GRPCRequest: request, GRPCDiscardUnknown: true},
-		{Name: "grpc:gov_v1beta1_proposals", GRPCMethod: "/cosmos.gov.v1beta1.Query/Proposals", GRPCRequest: request, GRPCDiscardUnknown: true},
-		{Name: "lcd:gov_v1_proposals", LCDPath: "/cosmos/gov/v1/proposals", LCDQuery: lcdPage},
-		{Name: "lcd:gov_v1beta1_proposals", LCDPath: "/cosmos/gov/v1beta1/proposals", LCDQuery: lcdPage},
-	})
-	if err == nil {
-		resolved.Data = normalizeList(resolved.Data, "proposals")
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, map[string]any{"status": in.Status, "voter": in.Voter, "depositor": in.Depositor, "pagination": in.Pagination}, resolved.Data, err)
+	return s.simpleQuery(ctx, started, "governance_proposals", in.Height,
+		map[string]any{"status": in.Status, "voter": in.Voter, "depositor": in.Depositor, "pagination": in.Pagination, "height": in.Height},
+		[]cosmos.Binding{
+			{Name: "grpc:gov_v1_proposals", GRPCMethod: "/cosmos.gov.v1.Query/Proposals", GRPCRequest: request, GRPCDiscardUnknown: true},
+			{Name: "grpc:gov_v1beta1_proposals", GRPCMethod: "/cosmos.gov.v1beta1.Query/Proposals", GRPCRequest: request, GRPCDiscardUnknown: true},
+			{Name: "lcd:gov_v1_proposals", LCDPath: "/cosmos/gov/v1/proposals", LCDQuery: lcdPage},
+			{Name: "lcd:gov_v1beta1_proposals", LCDPath: "/cosmos/gov/v1beta1/proposals", LCDQuery: lcdPage},
+		}, "proposals")
 }
 
 func (s *Server) getProposal(ctx context.Context, _ *mcp.CallToolRequest, in proposalInput) (*mcp.CallToolResult, ToolResponse, error) {
@@ -332,16 +351,14 @@ func (s *Server) getProposal(ctx context.Context, _ *mcp.CallToolRequest, in pro
 		return response(started, "system", map[string]any{"proposal_id": in.ProposalID}, nil, cosmos.NewError(cosmos.CodeInvalidInput, "proposal_id must be a positive decimal string", err))
 	}
 	request := map[string]any{"proposal_id": in.ProposalID}
-	resolved, err := s.query.Resolve(ctx, "governance_proposal", []cosmos.Binding{
-		{Name: "grpc:gov_v1_proposal", GRPCMethod: "/cosmos.gov.v1.Query/Proposal", GRPCRequest: request},
-		{Name: "grpc:gov_v1beta1_proposal", GRPCMethod: "/cosmos.gov.v1beta1.Query/Proposal", GRPCRequest: request},
-		{Name: "lcd:gov_v1_proposal", LCDPath: "/cosmos/gov/v1/proposals/" + in.ProposalID},
-		{Name: "lcd:gov_v1beta1_proposal", LCDPath: "/cosmos/gov/v1beta1/proposals/" + in.ProposalID},
-	})
-	if err == nil {
-		resolved.Data = normalizeFields(resolved.Data, "proposal")
-	}
-	return responseBound(started, resolved.Source, resolved.Binding, request, resolved.Data, err)
+	return s.simpleQuery(ctx, started, "governance_proposal", in.Height,
+		map[string]any{"proposal_id": in.ProposalID, "height": in.Height},
+		[]cosmos.Binding{
+			{Name: "grpc:gov_v1_proposal", GRPCMethod: "/cosmos.gov.v1.Query/Proposal", GRPCRequest: request},
+			{Name: "grpc:gov_v1beta1_proposal", GRPCMethod: "/cosmos.gov.v1beta1.Query/Proposal", GRPCRequest: request},
+			{Name: "lcd:gov_v1_proposal", LCDPath: "/cosmos/gov/v1/proposals/" + in.ProposalID},
+			{Name: "lcd:gov_v1beta1_proposal", LCDPath: "/cosmos/gov/v1beta1/proposals/" + in.ProposalID},
+		}, "", "proposal")
 }
 
 func (s *Server) searchTransactions(ctx context.Context, _ *mcp.CallToolRequest, in transactionSearchInput) (*mcp.CallToolResult, ToolResponse, error) {
