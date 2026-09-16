@@ -420,3 +420,40 @@ func TestGetTokenInfoAttachesIBCDenomTrace(t *testing.T) {
 		t.Fatalf("denom_trace = %#v", toolResp.Data)
 	}
 }
+
+// The trace is what identifies an ibc/HASH token, so it is worth returning on a
+// chain whose bank module serves neither query.
+func TestGetTokenInfoReturnsTraceWhenBothBankQueriesAreUnsupported(t *testing.T) {
+	const hash = "ABC123"
+	s := newLCDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ibc/apps/transfer/v1/denom_traces/"+hash {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"denom_trace": map[string]any{"path": "transfer/channel-0", "base_denom": "uatom"},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	_, toolResp, err := s.getTokenInfo(context.Background(), nil, denomInput{Denom: "ibc/" + hash})
+	if err != nil || toolResp.Error != nil {
+		t.Fatalf("getTokenInfo() error = %v, toolError = %#v", err, toolResp.Error)
+	}
+	data, _ := toolResp.Data.(map[string]any)
+	trace, _ := data["denom_trace"].(map[string]any)
+	if trace["base_denom"] != "uatom" {
+		t.Fatalf("denom_trace = %#v", data)
+	}
+	if warnings, _ := data["warnings"].([]string); len(warnings) != 2 {
+		t.Fatalf("warnings = %#v", data["warnings"])
+	}
+}
+
+// Without a trace to fall back on there is nothing to report, and the caller
+// must not read an empty result as "this token has no supply".
+func TestGetTokenInfoErrorsWhenNoSubqueryResolves(t *testing.T) {
+	s := newLCDServer(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	_, toolResp, err := s.getTokenInfo(context.Background(), nil, denomInput{Denom: "uatom"})
+	if err != nil || toolResp.Error == nil || toolResp.Error.Code != cosmos.CodeUnsupportedCapability {
+		t.Fatalf("getTokenInfo() = %#v, err = %v", toolResp.Error, err)
+	}
+}

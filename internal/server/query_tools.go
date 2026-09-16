@@ -249,9 +249,6 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	if metadataErr != nil && !optionalCapabilityError(metadataErr) {
 		return responseBound(started, metadata.Source, metadata.Binding, map[string]any{"denom": denom}, nil, metadataErr)
 	}
-	if supplyErr != nil && metadataErr != nil {
-		return response(started, "system", map[string]any{"denom": denom}, nil, supplyErr)
-	}
 	data := map[string]any{"denom": denom, "raw": map[string]any{}}
 	warnings := []string{}
 	sources, bindings := []string{}, []string{}
@@ -283,6 +280,9 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	}
 	if len(warnings) > 0 {
 		data["warnings"] = warnings
+	}
+	if len(sources) == 0 {
+		return response(started, "system", map[string]any{"denom": denom}, nil, supplyErr)
 	}
 	return responseBound(started, commonSource(sources), strings.Join(bindings, ";"), map[string]any{"denom": denom, "height": in.Height}, data, nil)
 }
