@@ -127,6 +127,43 @@ type proposalInput struct {
 	ProposalID string `json:"proposal_id" jsonschema:"positive decimal proposal identifier"`
 	heightInput
 }
+type proposalVotesInput struct {
+	ProposalID string           `json:"proposal_id" jsonschema:"positive decimal proposal identifier"`
+	Voter      string           `json:"voter,omitempty" jsonschema:"optional voter address to return that voter's single vote"`
+	Pagination *paginationInput `json:"pagination,omitempty"`
+	heightInput
+}
+type proposalDepositsInput struct {
+	ProposalID string           `json:"proposal_id" jsonschema:"positive decimal proposal identifier"`
+	Depositor  string           `json:"depositor,omitempty" jsonschema:"optional depositor address to return that depositor's single deposit"`
+	Pagination *paginationInput `json:"pagination,omitempty"`
+	heightInput
+}
+type redelegationsInput struct {
+	DelegatorAddress    string           `json:"delegator_address" jsonschema:"Cosmos delegator account address"`
+	SrcValidatorAddress string           `json:"src_validator_address,omitempty" jsonschema:"optional source validator operator address"`
+	DstValidatorAddress string           `json:"dst_validator_address,omitempty" jsonschema:"optional destination validator operator address"`
+	Pagination          *paginationInput `json:"pagination,omitempty"`
+	heightInput
+}
+type validatorDelegationsInput struct {
+	ValidatorAddress string           `json:"validator_address" jsonschema:"Cosmos validator operator address"`
+	Pagination       *paginationInput `json:"pagination,omitempty"`
+	heightInput
+}
+type signingInfosInput struct {
+	ConsensusAddress string           `json:"consensus_address,omitempty" jsonschema:"optional validator consensus address to return one signing info"`
+	Pagination       *paginationInput `json:"pagination,omitempty"`
+	heightInput
+}
+type pagedInput struct {
+	Pagination *paginationInput `json:"pagination,omitempty"`
+	heightInput
+}
+type denomTraceInput struct {
+	Denom string `json:"denom" jsonschema:"IBC denomination as ibc/HASH or the bare hash"`
+	heightInput
+}
 type transactionSearchInput struct {
 	Events     []string         `json:"events" jsonschema:"CometBFT event filters such as message.sender='cosmos1...'"`
 	Order      string           `json:"order,omitempty" jsonschema:"asc or desc"`
@@ -216,6 +253,23 @@ func (s *Server) registerTools() {
 		mcp.AddTool(s.MCP, tool("get_rewards", "Get delegation rewards for an account."), s.getRewards)
 		mcp.AddTool(s.MCP, tool("get_proposals", "Get governance proposals."), s.getProposals)
 		mcp.AddTool(s.MCP, tool("get_proposal", "Get one governance proposal."), s.getProposal)
+		mcp.AddTool(s.MCP, tool("get_proposal_tally", "Get the current vote tally for one governance proposal."), s.getProposalTally)
+		mcp.AddTool(s.MCP, tool("get_proposal_votes", "Get votes on a governance proposal, or one voter's vote."), s.getProposalVotes)
+		mcp.AddTool(s.MCP, tool("get_proposal_deposits", "Get deposits on a governance proposal, or one depositor's deposit."), s.getProposalDeposits)
+		mcp.AddTool(s.MCP, tool("get_redelegations", "Get redelegations for an account, optionally filtered by source and destination validator."), s.getRedelegations)
+		mcp.AddTool(s.MCP, tool("get_validator_delegations", "Get the delegations made to one validator."), s.getValidatorDelegations)
+		mcp.AddTool(s.MCP, tool("get_staking_pool", "Get bonded and not-bonded staking token totals."), s.getStakingPool)
+		mcp.AddTool(s.MCP, tool("get_total_supply", "Get the total supply of every denomination on the chain."), s.getTotalSupply)
+		mcp.AddTool(s.MCP, tool("get_community_pool", "Get the distribution module community pool balance."), s.getCommunityPool)
+		mcp.AddTool(s.MCP, tool("get_inflation", "Get the current inflation rate and annual provisions."), s.getInflation)
+		mcp.AddTool(s.MCP, tool("get_signing_infos", "Get validator signing and jail information, or one validator's by consensus address."), s.getSigningInfos)
+		mcp.AddTool(s.MCP, tool("get_denom_trace", "Resolve an IBC denomination to its origin chain and transfer path."), s.getDenomTrace)
+		mcp.AddTool(s.MCP, tool("get_staking_params", "Get x/staking parameters such as unbonding time and the validator limit."), s.moduleParams("staking"))
+		mcp.AddTool(s.MCP, tool("get_gov_params", "Get x/gov parameters such as voting period, quorum, and minimum deposit."), s.getGovParams)
+		mcp.AddTool(s.MCP, tool("get_distribution_params", "Get x/distribution parameters such as the community tax."), s.moduleParams("distribution"))
+		mcp.AddTool(s.MCP, tool("get_mint_params", "Get x/mint parameters such as the inflation rate bounds."), s.moduleParams("mint"))
+		mcp.AddTool(s.MCP, tool("get_slashing_params", "Get x/slashing parameters such as the downtime jail duration."), s.moduleParams("slashing"))
+		mcp.AddTool(s.MCP, tool("get_bank_params", "Get x/bank parameters such as the default send-enabled flag."), s.moduleParams("bank"))
 	}
 	if s.rpc != nil || s.lcd != nil || s.grpc != nil {
 		mcp.AddTool(s.MCP, tool("search_transactions", "Search transactions using CometBFT event filters."), s.searchTransactions)

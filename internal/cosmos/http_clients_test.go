@@ -94,6 +94,73 @@ func TestIsRouteNotFoundGenericGRPCGatewayMiss(t *testing.T) {
 	}
 }
 
+// An ibc-go v9 chain answers the /denom_traces route it replaced with 501 and
+// gRPC code 12 rather than 404, so without this the v9 fallback binding never
+// runs on the chains it exists for.
+func TestIsRouteNotFoundGatewayUnimplemented(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"code":12, "message":"unknown method Denom for service ibc.applications.transfer.v1.Query", "details":[]}`))
+	}))
+	defer upstream.Close()
+	client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, callErr := client.Get(context.Background(), "/ibc/apps/transfer/v1/denom_traces/ABC", nil)
+	if !IsRouteNotFound(callErr) {
+		t.Fatalf("IsRouteNotFound() = false for a grpc-gateway 501/Unimplemented, err = %v", callErr)
+	}
+}
+
+// A 501 from a proxy rather than the gateway applies to every path, so accepting
+// it would strand every capability in the negative cache.
+func TestIsRouteNotFoundRejectsNonGatewayUnimplemented(t *testing.T) {
+	for name, body := range map[string]string{
+		"plain text": "Not Implemented",
+		"empty":      "",
+		"html":       "<html><head><title>501 Not Implemented</title></head></html>",
+		"other code": `{"code":2, "message":"Not Implemented", "details":[]}`,
+		"truncated":  `{"code":12, "message":"unknown met`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotImplemented)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer upstream.Close()
+			client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, callErr := client.Get(context.Background(), "/a", nil)
+			if IsRouteNotFound(callErr) {
+				t.Errorf("IsRouteNotFound() = true for a 501 that is not a grpc-gateway Unimplemented")
+			}
+		})
+	}
+}
+
+// 501 is the only status that means "this endpoint does not implement this";
+// the statuses that mean "not right now" must still surface to the caller.
+func TestIsRouteNotFoundRejectsTransientStatuses(t *testing.T) {
+	for _, code := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout, http.StatusUnauthorized, http.StatusInternalServerError} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"code":12, "message":"Not Implemented", "details":[]}`))
+		}))
+		client, err := NewLCDClient(upstream.URL, NewHTTPClient(time.Second, 1<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, callErr := client.Get(context.Background(), "/a", nil)
+		if IsRouteNotFound(callErr) {
+			t.Errorf("IsRouteNotFound() = true for HTTP %d; only 404 and 501 may end a binding attempt", code)
+		}
+		upstream.Close()
+	}
+}
+
 func TestIsRouteNotFoundPreservesResourceLevelMiss(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

@@ -23,6 +23,9 @@ func TestStateToolsPinHeightOnTheUpstreamRequest(t *testing.T) {
 			"validator":            map[string]any{},
 			"delegation_responses": []any{},
 			"proposal":             map[string]any{},
+			"tally":                map[string]any{},
+			"params":               map[string]any{},
+			"pool":                 map[string]any{},
 			"pagination":           map[string]any{},
 		})
 	})
@@ -54,6 +57,23 @@ func TestStateToolsPinHeightOnTheUpstreamRequest(t *testing.T) {
 		},
 		"get_proposal": func() error {
 			_, _, err := s.getProposal(t.Context(), nil, proposalInput{ProposalID: "1", heightInput: heightInput{Height: "100"}})
+			return err
+		},
+		"get_proposal_tally": func() error {
+			_, _, err := s.getProposalTally(t.Context(), nil, proposalInput{ProposalID: "1", heightInput: heightInput{Height: "100"}})
+			return err
+		},
+		"get_staking_pool": func() error { _, _, err := s.getStakingPool(t.Context(), nil, heightInput{Height: "100"}); return err },
+		"get_staking_params": func() error {
+			_, _, err := s.moduleParams("staking")(t.Context(), nil, heightInput{Height: "100"})
+			return err
+		},
+		"get_total_supply": func() error {
+			_, _, err := s.getTotalSupply(t.Context(), nil, pagedInput{heightInput: heightInput{Height: "100"}})
+			return err
+		},
+		"get_signing_infos": func() error {
+			_, _, err := s.getSigningInfos(t.Context(), nil, signingInfosInput{heightInput: heightInput{Height: "100"}})
 			return err
 		},
 	}

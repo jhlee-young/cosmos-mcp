@@ -17,7 +17,28 @@ import (
 const (
 	defaultPageLimit = uint64(50)
 	maxPageLimit     = uint64(200)
+	ibcDenomPrefix   = "ibc/"
 )
+
+func validProposalID(raw string) error {
+	if value, err := strconv.ParseUint(raw, 10, 64); err != nil || value == 0 {
+		return cosmos.NewError(cosmos.CodeInvalidInput, "proposal_id must be a positive decimal string", err)
+	}
+	return nil
+}
+
+// denomTraceBindings resolves an IBC voucher hash to its origin chain and path.
+// ibc-go v9 renamed DenomTrace to Denom and /denom_traces to /denoms; the older
+// names are tried first because they are what the large majority of live chains
+// still serve.
+func denomTraceBindings(hash string) []cosmos.Binding {
+	return []cosmos.Binding{
+		{Name: "grpc:denom_trace", GRPCMethod: "/ibc.applications.transfer.v1.Query/DenomTrace", GRPCRequest: map[string]any{"hash": hash}},
+		{Name: "lcd:denom_trace", LCDPath: "/ibc/apps/transfer/v1/denom_traces/" + url.PathEscape(hash)},
+		{Name: "grpc:denom", GRPCMethod: "/ibc.applications.transfer.v1.Query/Denom", GRPCRequest: map[string]any{"hash": hash}},
+		{Name: "lcd:denom", LCDPath: "/ibc/apps/transfer/v1/denoms/" + url.PathEscape(hash)},
+	}
+}
 
 // heightContext validates an optional historical block height and pins every
 // LCD and gRPC read made with the returned context to it.
@@ -48,6 +69,31 @@ func (s *Server) simpleQuery(ctx context.Context, started time.Time, capability,
 		}
 	}
 	return responseBound(started, resolved.Source, resolved.Binding, request, resolved.Data, err)
+}
+
+// govBindings pairs the v1 and v1beta1 routes for one x/gov query. v1 replaced
+// v1beta1 in SDK v0.46 but many live chains still serve only the older API, and
+// nothing in a response reliably reports which one the chain has.
+func govBindings(name, method, path string, request map[string]any, query map[string]string) []cosmos.Binding {
+	return []cosmos.Binding{
+		{Name: "grpc:gov_v1_" + name, GRPCMethod: "/cosmos.gov.v1.Query/" + method, GRPCRequest: request, GRPCDiscardUnknown: true},
+		{Name: "grpc:gov_v1beta1_" + name, GRPCMethod: "/cosmos.gov.v1beta1.Query/" + method, GRPCRequest: request, GRPCDiscardUnknown: true},
+		{Name: "lcd:gov_v1_" + name, LCDPath: "/cosmos/gov/v1" + path, LCDQuery: query},
+		{Name: "lcd:gov_v1beta1_" + name, LCDPath: "/cosmos/gov/v1beta1" + path, LCDQuery: query},
+	}
+}
+
+// moduleBindings pairs the gRPC and LCD routes for a query that exists at the
+// same name in exactly one version of a module's Query service. Binding names
+// are derived from the method rather than the path so that they stay stable
+// across calls when the path embeds an address, which is what lets the resolver
+// reuse a cached binding.
+func moduleBindings(module, method, path string, request map[string]any, query map[string]string) []cosmos.Binding {
+	name := module + "_" + strings.ToLower(method)
+	return []cosmos.Binding{
+		{Name: "grpc:" + name, GRPCMethod: "/cosmos." + module + ".v1beta1.Query/" + method, GRPCRequest: request},
+		{Name: "lcd:" + name, LCDPath: "/cosmos/" + module + "/v1beta1/" + path, LCDQuery: query},
+	}
 }
 
 func (s *Server) resolveChainStatus(ctx context.Context) (cosmos.Resolution, error) {
@@ -203,9 +249,6 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	if metadataErr != nil && !optionalCapabilityError(metadataErr) {
 		return responseBound(started, metadata.Source, metadata.Binding, map[string]any{"denom": denom}, nil, metadataErr)
 	}
-	if supplyErr != nil && metadataErr != nil {
-		return response(started, "system", map[string]any{"denom": denom}, nil, supplyErr)
-	}
 	data := map[string]any{"denom": denom, "raw": map[string]any{}}
 	warnings := []string{}
 	sources, bindings := []string{}, []string{}
@@ -223,8 +266,27 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	} else {
 		warnings = append(warnings, "denomination metadata is unavailable")
 	}
+	// An ibc/HASH denom says nothing about what the token actually is, so
+	// resolve the trace alongside it. Failure is tolerated the same way a
+	// missing supply or metadata query is.
+	if hash, isIBC := strings.CutPrefix(denom, ibcDenomPrefix); isIBC {
+		trace, traceErr := s.query.Resolve(ctx, "denom_trace", denomTraceBindings(hash))
+		switch {
+		case traceErr == nil:
+			data["denom_trace"] = firstNonNil(object(trace.Data)["denom_trace"], object(trace.Data)["denom"])
+			data["raw"].(map[string]any)["denom_trace"] = trace.Data
+			sources, bindings = append(sources, trace.Source), append(bindings, trace.Binding)
+		case !optionalCapabilityError(traceErr):
+			return responseBound(started, trace.Source, trace.Binding, map[string]any{"denom": denom}, nil, traceErr)
+		default:
+			warnings = append(warnings, "IBC denomination trace is unavailable")
+		}
+	}
 	if len(warnings) > 0 {
 		data["warnings"] = warnings
+	}
+	if len(sources) == 0 {
+		return response(started, "system", map[string]any{"denom": denom}, nil, supplyErr)
 	}
 	return responseBound(started, commonSource(sources), strings.Join(bindings, ";"), map[string]any{"denom": denom, "height": in.Height}, data, nil)
 }
@@ -337,28 +399,290 @@ func (s *Server) getProposals(ctx context.Context, _ *mcp.CallToolRequest, in pr
 	}
 	return s.simpleQuery(ctx, started, "governance_proposals", in.Height,
 		map[string]any{"status": in.Status, "voter": in.Voter, "depositor": in.Depositor, "pagination": in.Pagination, "height": in.Height},
-		[]cosmos.Binding{
-			{Name: "grpc:gov_v1_proposals", GRPCMethod: "/cosmos.gov.v1.Query/Proposals", GRPCRequest: request, GRPCDiscardUnknown: true},
-			{Name: "grpc:gov_v1beta1_proposals", GRPCMethod: "/cosmos.gov.v1beta1.Query/Proposals", GRPCRequest: request, GRPCDiscardUnknown: true},
-			{Name: "lcd:gov_v1_proposals", LCDPath: "/cosmos/gov/v1/proposals", LCDQuery: lcdPage},
-			{Name: "lcd:gov_v1beta1_proposals", LCDPath: "/cosmos/gov/v1beta1/proposals", LCDQuery: lcdPage},
-		}, "proposals")
+		govBindings("proposals", "Proposals", "/proposals", request, lcdPage), "proposals")
 }
 
 func (s *Server) getProposal(ctx context.Context, _ *mcp.CallToolRequest, in proposalInput) (*mcp.CallToolResult, ToolResponse, error) {
 	started := time.Now()
-	if value, err := strconv.ParseUint(in.ProposalID, 10, 64); err != nil || value == 0 {
-		return response(started, "system", map[string]any{"proposal_id": in.ProposalID}, nil, cosmos.NewError(cosmos.CodeInvalidInput, "proposal_id must be a positive decimal string", err))
+	if err := validProposalID(in.ProposalID); err != nil {
+		return response(started, "system", map[string]any{"proposal_id": in.ProposalID}, nil, err)
 	}
 	request := map[string]any{"proposal_id": in.ProposalID}
 	return s.simpleQuery(ctx, started, "governance_proposal", in.Height,
 		map[string]any{"proposal_id": in.ProposalID, "height": in.Height},
-		[]cosmos.Binding{
-			{Name: "grpc:gov_v1_proposal", GRPCMethod: "/cosmos.gov.v1.Query/Proposal", GRPCRequest: request},
-			{Name: "grpc:gov_v1beta1_proposal", GRPCMethod: "/cosmos.gov.v1beta1.Query/Proposal", GRPCRequest: request},
-			{Name: "lcd:gov_v1_proposal", LCDPath: "/cosmos/gov/v1/proposals/" + in.ProposalID},
-			{Name: "lcd:gov_v1beta1_proposal", LCDPath: "/cosmos/gov/v1beta1/proposals/" + in.ProposalID},
-		}, "", "proposal")
+		govBindings("proposal", "Proposal", "/proposals/"+in.ProposalID, request, nil), "", "proposal")
+}
+
+func (s *Server) getProposalTally(ctx context.Context, _ *mcp.CallToolRequest, in proposalInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	if err := validProposalID(in.ProposalID); err != nil {
+		return response(started, "system", map[string]any{"proposal_id": in.ProposalID}, nil, err)
+	}
+	request := map[string]any{"proposal_id": in.ProposalID}
+	return s.simpleQuery(ctx, started, "governance_tally", in.Height,
+		map[string]any{"proposal_id": in.ProposalID, "height": in.Height},
+		govBindings("tally", "TallyResult", "/proposals/"+in.ProposalID+"/tally", request, nil), "", "tally")
+}
+
+func (s *Server) getProposalVotes(ctx context.Context, _ *mcp.CallToolRequest, in proposalVotesInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	if err := validProposalID(in.ProposalID); err != nil {
+		return response(started, "system", map[string]any{"proposal_id": in.ProposalID}, nil, err)
+	}
+	echo := map[string]any{"proposal_id": in.ProposalID, "voter": in.Voter, "pagination": in.Pagination, "height": in.Height}
+	if in.Voter != "" {
+		voter, err := safeValue(in.Voter, "voter")
+		if err != nil {
+			return response(started, "system", echo, nil, err)
+		}
+		return s.simpleQuery(ctx, started, "governance_vote", in.Height, echo,
+			govBindings("vote", "Vote", "/proposals/"+in.ProposalID+"/votes/"+url.PathEscape(voter),
+				map[string]any{"proposal_id": in.ProposalID, "voter": voter}, nil), "", "vote")
+	}
+	grpcPage, lcdPage, err := pagination(in.Pagination)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	return s.simpleQuery(ctx, started, "governance_votes", in.Height, echo,
+		govBindings("votes", "Votes", "/proposals/"+in.ProposalID+"/votes",
+			map[string]any{"proposal_id": in.ProposalID, "pagination": grpcPage}, lcdPage), "votes")
+}
+
+func (s *Server) getProposalDeposits(ctx context.Context, _ *mcp.CallToolRequest, in proposalDepositsInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	if err := validProposalID(in.ProposalID); err != nil {
+		return response(started, "system", map[string]any{"proposal_id": in.ProposalID}, nil, err)
+	}
+	echo := map[string]any{"proposal_id": in.ProposalID, "depositor": in.Depositor, "pagination": in.Pagination, "height": in.Height}
+	if in.Depositor != "" {
+		depositor, err := safeValue(in.Depositor, "depositor")
+		if err != nil {
+			return response(started, "system", echo, nil, err)
+		}
+		return s.simpleQuery(ctx, started, "governance_deposit", in.Height, echo,
+			govBindings("deposit", "Deposit", "/proposals/"+in.ProposalID+"/deposits/"+url.PathEscape(depositor),
+				map[string]any{"proposal_id": in.ProposalID, "depositor": depositor}, nil), "", "deposit")
+	}
+	grpcPage, lcdPage, err := pagination(in.Pagination)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	return s.simpleQuery(ctx, started, "governance_deposits", in.Height, echo,
+		govBindings("deposits", "Deposits", "/proposals/"+in.ProposalID+"/deposits",
+			map[string]any{"proposal_id": in.ProposalID, "pagination": grpcPage}, lcdPage), "deposits")
+}
+
+// govParamsBindings builds the routes for one x/gov parameter group. Unlike
+// every other module, x/gov keys its parameters by type, so the type is a
+// required path segment rather than an optional filter.
+func govParamsBindings(paramsType string) []cosmos.Binding {
+	return govBindings("params_"+paramsType, "Params", "/params/"+paramsType,
+		map[string]any{"params_type": paramsType}, nil)
+}
+
+// getGovParams reads x/gov parameters. gov v1 returns the whole set in "params"
+// whatever params_type is asked for, so one query is enough there. v1beta1 has
+// no "params" field at all and populates only the group named, so reading it
+// completely takes one query per group - asking a v1beta1 chain for "voting"
+// alone yields the voting period and nothing else, silently omitting the quorum
+// and deposit parameters this tool advertises.
+func (s *Server) getGovParams(ctx context.Context, _ *mcp.CallToolRequest, in heightInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"height": in.Height}
+	ctx, err := heightContext(ctx, in.Height)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	voting, err := s.query.Resolve(ctx, "governance_params", govParamsBindings("voting"))
+	if err != nil {
+		return responseBound(started, voting.Source, voting.Binding, echo, nil, err)
+	}
+	data := normalizeFields(voting.Data, "params", "voting_params", "deposit_params", "tally_params")
+	if object(voting.Data)["params"] != nil {
+		return responseBound(started, voting.Source, voting.Binding, echo, data, nil)
+	}
+
+	raw := map[string]any{"voting": voting.Data}
+	warnings := []string{}
+	sources, bindings := []string{voting.Source}, []string{voting.Binding}
+	for _, group := range []struct{ paramsType, key string }{
+		{"deposit", "deposit_params"},
+		{"tallying", "tally_params"},
+	} {
+		resolved, groupErr := s.query.Resolve(ctx, "governance_params_"+group.paramsType, govParamsBindings(group.paramsType))
+		if groupErr != nil {
+			if !optionalCapabilityError(groupErr) {
+				return responseBound(started, resolved.Source, resolved.Binding, echo, nil, groupErr)
+			}
+			warnings = append(warnings, group.key+" are unavailable")
+			continue
+		}
+		data[group.key] = object(resolved.Data)[group.key]
+		raw[group.paramsType] = resolved.Data
+		sources, bindings = append(sources, resolved.Source), append(bindings, resolved.Binding)
+	}
+	data["raw"] = raw
+	if len(warnings) > 0 {
+		data["warnings"] = warnings
+	}
+	return responseBound(started, commonSource(sources), strings.Join(bindings, ";"), echo, data, nil)
+}
+
+func (s *Server) getRedelegations(ctx context.Context, _ *mcp.CallToolRequest, in redelegationsInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"delegator_address": in.DelegatorAddress, "src_validator_address": in.SrcValidatorAddress, "dst_validator_address": in.DstValidatorAddress, "pagination": in.Pagination, "height": in.Height}
+	delegator, err := safeValue(in.DelegatorAddress, "delegator_address")
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	grpcPage, lcdPage, err := pagination(in.Pagination)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	request := map[string]any{"delegator_addr": delegator, "pagination": grpcPage}
+	for _, filter := range []struct{ name, raw string }{
+		{"src_validator_addr", in.SrcValidatorAddress},
+		{"dst_validator_addr", in.DstValidatorAddress},
+	} {
+		if filter.raw == "" {
+			continue
+		}
+		value, valueErr := safeValue(filter.raw, filter.name)
+		if valueErr != nil {
+			return response(started, "system", echo, nil, valueErr)
+		}
+		request[filter.name] = value
+		lcdPage[filter.name] = value
+	}
+	return s.simpleQuery(ctx, started, "redelegations", in.Height, echo, []cosmos.Binding{
+		{Name: "grpc:redelegations", GRPCMethod: "/cosmos.staking.v1beta1.Query/Redelegations", GRPCRequest: request},
+		{Name: "lcd:redelegations", LCDPath: "/cosmos/staking/v1beta1/delegators/" + url.PathEscape(delegator) + "/redelegations", LCDQuery: lcdPage},
+	}, "redelegation_responses")
+}
+
+func (s *Server) getValidatorDelegations(ctx context.Context, _ *mcp.CallToolRequest, in validatorDelegationsInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"validator_address": in.ValidatorAddress, "pagination": in.Pagination, "height": in.Height}
+	validator, err := safeValue(in.ValidatorAddress, "validator_address")
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	grpcPage, lcdPage, err := pagination(in.Pagination)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	return s.simpleQuery(ctx, started, "validator_delegations", in.Height, echo, []cosmos.Binding{
+		{Name: "grpc:validator_delegations", GRPCMethod: "/cosmos.staking.v1beta1.Query/ValidatorDelegations", GRPCRequest: map[string]any{"validator_addr": validator, "pagination": grpcPage}},
+		{Name: "lcd:validator_delegations", LCDPath: "/cosmos/staking/v1beta1/validators/" + url.PathEscape(validator) + "/delegations", LCDQuery: lcdPage},
+	}, "delegation_responses")
+}
+
+func (s *Server) getStakingPool(ctx context.Context, _ *mcp.CallToolRequest, in heightInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	return s.simpleQuery(ctx, started, "staking_pool", in.Height, map[string]any{"height": in.Height},
+		moduleBindings("staking", "Pool", "pool", map[string]any{}, nil), "", "pool")
+}
+
+func (s *Server) getCommunityPool(ctx context.Context, _ *mcp.CallToolRequest, in heightInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	return s.simpleQuery(ctx, started, "community_pool", in.Height, map[string]any{"height": in.Height},
+		moduleBindings("distribution", "CommunityPool", "community_pool", map[string]any{}, nil), "", "pool")
+}
+
+func (s *Server) getTotalSupply(ctx context.Context, _ *mcp.CallToolRequest, in pagedInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"pagination": in.Pagination, "height": in.Height}
+	grpcPage, lcdPage, err := pagination(in.Pagination)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	return s.simpleQuery(ctx, started, "total_supply", in.Height, echo,
+		moduleBindings("bank", "TotalSupply", "supply", map[string]any{"pagination": grpcPage}, lcdPage), "supply")
+}
+
+func (s *Server) getSigningInfos(ctx context.Context, _ *mcp.CallToolRequest, in signingInfosInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"consensus_address": in.ConsensusAddress, "pagination": in.Pagination, "height": in.Height}
+	if in.ConsensusAddress != "" {
+		address, err := safeValue(in.ConsensusAddress, "consensus_address")
+		if err != nil {
+			return response(started, "system", echo, nil, err)
+		}
+		return s.simpleQuery(ctx, started, "signing_info", in.Height, echo,
+			moduleBindings("slashing", "SigningInfo", "signing_infos/"+url.PathEscape(address), map[string]any{"cons_address": address}, nil),
+			"", "val_signing_info")
+	}
+	grpcPage, lcdPage, err := pagination(in.Pagination)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	return s.simpleQuery(ctx, started, "signing_infos", in.Height, echo,
+		moduleBindings("slashing", "SigningInfos", "signing_infos", map[string]any{"pagination": grpcPage}, lcdPage), "info")
+}
+
+func (s *Server) getDenomTrace(ctx context.Context, _ *mcp.CallToolRequest, in denomTraceInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"denom": in.Denom, "height": in.Height}
+	hash, err := safeValue(strings.TrimPrefix(strings.TrimSpace(in.Denom), ibcDenomPrefix), "denom")
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	return s.simpleQuery(ctx, started, "denom_trace", in.Height, echo, denomTraceBindings(hash), "", "denom_trace", "denom")
+}
+
+// getInflation reports the current inflation rate and annual provisions, which
+// are separate x/mint queries; one can be present without the other, and chains
+// that replaced the standard x/mint expose neither.
+func (s *Server) getInflation(ctx context.Context, _ *mcp.CallToolRequest, in heightInput) (*mcp.CallToolResult, ToolResponse, error) {
+	started := time.Now()
+	echo := map[string]any{"height": in.Height}
+	ctx, err := heightContext(ctx, in.Height)
+	if err != nil {
+		return response(started, "system", echo, nil, err)
+	}
+	inflation, inflationErr := s.query.Resolve(ctx, "mint_inflation", moduleBindings("mint", "Inflation", "inflation", map[string]any{}, nil))
+	if inflationErr != nil && !optionalCapabilityError(inflationErr) {
+		return responseBound(started, inflation.Source, inflation.Binding, echo, nil, inflationErr)
+	}
+	provisions, provisionsErr := s.query.Resolve(ctx, "mint_annual_provisions", moduleBindings("mint", "AnnualProvisions", "annual_provisions", map[string]any{}, nil))
+	if provisionsErr != nil && !optionalCapabilityError(provisionsErr) {
+		return responseBound(started, provisions.Source, provisions.Binding, echo, nil, provisionsErr)
+	}
+	if inflationErr != nil && provisionsErr != nil {
+		return response(started, "system", echo, nil, inflationErr)
+	}
+	data := map[string]any{"raw": map[string]any{}}
+	warnings := []string{}
+	sources, bindings := []string{}, []string{}
+	if inflationErr == nil {
+		data["inflation"] = object(inflation.Data)["inflation"]
+		data["raw"].(map[string]any)["inflation"] = inflation.Data
+		sources, bindings = append(sources, inflation.Source), append(bindings, inflation.Binding)
+	} else {
+		warnings = append(warnings, "inflation is unavailable")
+	}
+	if provisionsErr == nil {
+		data["annual_provisions"] = object(provisions.Data)["annual_provisions"]
+		data["raw"].(map[string]any)["annual_provisions"] = provisions.Data
+		sources, bindings = append(sources, provisions.Source), append(bindings, provisions.Binding)
+	} else {
+		warnings = append(warnings, "annual provisions are unavailable")
+	}
+	if len(warnings) > 0 {
+		data["warnings"] = warnings
+	}
+	return responseBound(started, commonSource(sources), strings.Join(bindings, ";"), echo, data, nil)
+}
+
+// moduleParams builds a handler for a module whose parameters live at the
+// conventional v1beta1 Params method and /params route. x/gov does not follow
+// this shape and is handled by getGovParams.
+func (s *Server) moduleParams(module string) func(context.Context, *mcp.CallToolRequest, heightInput) (*mcp.CallToolResult, ToolResponse, error) {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in heightInput) (*mcp.CallToolResult, ToolResponse, error) {
+		started := time.Now()
+		return s.simpleQuery(ctx, started, module+"_params", in.Height, map[string]any{"height": in.Height},
+			moduleBindings(module, "Params", "params", map[string]any{}, nil), "", "params")
+	}
 }
 
 func (s *Server) searchTransactions(ctx context.Context, _ *mcp.CallToolRequest, in transactionSearchInput) (*mcp.CallToolResult, ToolResponse, error) {

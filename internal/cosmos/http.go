@@ -51,29 +51,33 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("upstream returned HTTP %d", e.StatusCode)
 }
 
-// IsRouteNotFound reports whether err represents an HTTP 404 that means the
-// queried route itself does not exist on this endpoint - either because a
-// plain-text 404 came from an HTTP router/proxy in front of the app, or
-// because grpc-gateway's own generic routing-miss error fired (no pattern
-// matched the request path at all). Only this should trigger falling back
-// to the next binding.
+// IsRouteNotFound reports whether err means the route is absent from this
+// endpoint, the only condition that may fall through to the next binding.
 //
-// It must NOT report true for an application-level 404 where a Cosmos SDK
-// query handler ran, matched the route, and legitimately could not find the
-// resource being queried (e.g. "proposal 42 doesn't exist"). Both cases can
-// arrive as JSON with the same gRPC code (5 = NotFound), so JSON-ness alone
-// cannot tell them apart; the routing-miss body is always the fixed
-// {"code":5,"message":"Not Found","details":[]}, while a resource miss
-// carries a handler-specific message identifying what was looked up.
+// 404: a proxy ahead of the app answers plain text, grpc-gateway's own routing
+// miss is the fixed {"code":5,"message":"Not Found","details":[]}. An app-level
+// miss ("proposal 42 doesn't exist") carries the same gRPC code 5, so only that
+// exact shape separates them; JSON that fails to parse is an app error cut by
+// errorBodyLimit, never the few-dozen-byte routing body.
 //
-// A body that looks like JSON (starts with '{') but fails to parse is
-// treated as a preserved application error rather than a route miss: the
-// fixed routing-miss body is only a few dozen bytes and can never be cut by
-// the errorBodyLimit truncation in DoJSON, so a parse failure here can only
-// mean a legitimate, likely larger, app error got truncated.
+// 501 with gRPC code 12: grpc-gateway answers 501 for a method the chain dropped
+// while a pattern still matches it (ibc-go v9's /denom_traces). Match on the code,
+// not the message. An empty or non-JSON body is not enough here - a plain 501
+// describes the proxy that sent it, not the route, and would strand every
+// capability in the negative cache.
 func IsRouteNotFound(err error) bool {
 	var statusErr *HTTPStatusError
-	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	if statusErr.StatusCode == http.StatusNotImplemented {
+		var gwErr grpcGatewayError
+		if json.Unmarshal([]byte(strings.TrimSpace(statusErr.Body)), &gwErr) != nil {
+			return false
+		}
+		return gwErr.Code == 12
+	}
+	if statusErr.StatusCode != http.StatusNotFound {
 		return false
 	}
 	body := strings.TrimSpace(statusErr.Body)
