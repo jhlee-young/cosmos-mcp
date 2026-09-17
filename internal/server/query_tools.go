@@ -270,11 +270,15 @@ func (s *Server) getTokenInfo(ctx context.Context, _ *mcp.CallToolRequest, in de
 	// resolve the trace alongside it. Failure is tolerated the same way a
 	// missing supply or metadata query is.
 	if hash, isIBC := strings.CutPrefix(denom, ibcDenomPrefix); isIBC {
-		if trace, traceErr := s.query.Resolve(ctx, "denom_trace", denomTraceBindings(hash)); traceErr == nil {
+		trace, traceErr := s.query.Resolve(ctx, "denom_trace", denomTraceBindings(hash))
+		switch {
+		case traceErr == nil:
 			data["denom_trace"] = firstNonNil(object(trace.Data)["denom_trace"], object(trace.Data)["denom"])
 			data["raw"].(map[string]any)["denom_trace"] = trace.Data
 			sources, bindings = append(sources, trace.Source), append(bindings, trace.Binding)
-		} else {
+		case !optionalCapabilityError(traceErr):
+			return responseBound(started, trace.Source, trace.Binding, map[string]any{"denom": denom}, nil, traceErr)
+		default:
 			warnings = append(warnings, "IBC denomination trace is unavailable")
 		}
 	}

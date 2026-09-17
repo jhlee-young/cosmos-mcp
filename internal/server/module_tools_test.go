@@ -457,3 +457,21 @@ func TestGetTokenInfoErrorsWhenNoSubqueryResolves(t *testing.T) {
 		t.Fatalf("getTokenInfo() = %#v, err = %v", toolResp.Error, err)
 	}
 }
+
+// A broken trace endpoint is a different problem from a chain that does not
+// serve the bank queries, and reporting it as unsupported_capability sends the
+// caller after the wrong endpoint.
+func TestGetTokenInfoReportsTraceUpstreamError(t *testing.T) {
+	const hash = "ABC123"
+	s := newLCDServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/ibc/apps/transfer/v1/denom_traces/"+hash {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	_, toolResp, err := s.getTokenInfo(context.Background(), nil, denomInput{Denom: "ibc/" + hash})
+	if err != nil || toolResp.Error == nil || toolResp.Error.Code != cosmos.CodeUpstreamError {
+		t.Fatalf("getTokenInfo() = %#v, err = %v", toolResp.Error, err)
+	}
+}
